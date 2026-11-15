@@ -1,4 +1,4 @@
-﻿from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -9,6 +9,7 @@ class ModelConfig:
     num_classes: int = 2185
     in_channels: int = 3
     base_channels: int = 32
+    rnn_type: str = "rnn"  # "rnn" | "gru" | "lstm"
     rnn_hidden_size: int = 256
     rnn_layers: int = 2
     rnn_nonlinearity: str = "tanh"
@@ -23,6 +24,7 @@ class ModelConfig:
             num_classes=int(data_cfg.get("num_classes", 2185)),
             in_channels=int(model_cfg.get("in_channels", 3)),
             base_channels=int(model_cfg.get("base_channels", 32)),
+            rnn_type=str(model_cfg.get("rnn_type", "rnn")).lower(),
             rnn_hidden_size=int(model_cfg.get("rnn_hidden_size", 256)),
             rnn_layers=int(model_cfg.get("rnn_layers", 2)),
             rnn_nonlinearity=str(model_cfg.get("rnn_nonlinearity", "tanh")),
@@ -84,18 +86,30 @@ class CnnRnnClassifier(BaseVisionClassifier):
         )
 
         cnn_out_dim = c * 16
-        self.rnn = nn.RNN(
+        # CNN features are post-ReLU/MaxPool (all >= 0, uncentred). Normalising each
+        # spatial token keeps the RNN pre-activations in tanh's linear range.
+        self.pre_norm = nn.LayerNorm(cnn_out_dim)
+
+        rnn_kwargs = dict(
             input_size=cnn_out_dim,
             hidden_size=config.rnn_hidden_size,
             num_layers=config.rnn_layers,
-            nonlinearity=config.rnn_nonlinearity,
             batch_first=True,
             bidirectional=config.bidirectional,
             dropout=config.dropout if config.rnn_layers > 1 else 0.0,
         )
+        if config.rnn_type == "rnn":
+            self.rnn = nn.RNN(nonlinearity=config.rnn_nonlinearity, **rnn_kwargs)
+        elif config.rnn_type == "gru":
+            self.rnn = nn.GRU(**rnn_kwargs)
+        elif config.rnn_type == "lstm":
+            self.rnn = nn.LSTM(**rnn_kwargs)
+        else:
+            raise ValueError(f"Unknown rnn_type: {config.rnn_type!r}")
 
         num_directions = 2 if config.bidirectional else 1
         rnn_out_dim = config.rnn_hidden_size * num_directions
+        self.post_norm = nn.LayerNorm(rnn_out_dim)
         self.head = nn.Sequential(
             nn.Dropout(p=config.dropout),
             nn.Linear(rnn_out_dim, config.num_classes),
@@ -109,14 +123,10 @@ class CnnRnnClassifier(BaseVisionClassifier):
                 nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.BatchNorm2d):
+            elif isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode="fan_in", nonlinearity="relu")
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.RNN):
+            elif isinstance(module, nn.RNNBase):
                 for name, param in module.named_parameters():
                     if "weight_ih" in name:
                         nn.init.xavier_uniform_(param)
@@ -125,18 +135,25 @@ class CnnRnnClassifier(BaseVisionClassifier):
                     elif "bias" in name:
                         nn.init.zeros_(param)
 
+        # Classifier head: small init -> initial logits ~ 0 -> initial loss ~ ln(num_classes).
+        # (Kaiming/ReLU gain on a linear output layer is unnecessarily large.)
+        head_linear = self.head[-1]
+        nn.init.normal_(head_linear.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(head_linear.bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # (B, 3, 224, 224) -> (B, 512, 7, 7)
         features = self.encoder(x)
 
         # (B, 512, 7, 7) -> (B, 49, 512) spatial sequence
         seq = features.flatten(2).transpose(1, 2)
+        seq = self.pre_norm(seq)
 
         # (B, 49, 512) -> (B, 49, num_directions * rnn_hidden_size)
         rnn_out, _ = self.rnn(seq)
 
         # Global mean pooling over sequence steps -> (B, rnn_out_dim)
-        pooled = rnn_out.mean(dim=1)
+        pooled = self.post_norm(rnn_out.mean(dim=1))
         return self.head(pooled)
 
 
@@ -148,7 +165,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = CnnRnnClassifier(m_cfg).to(device)
-    dummy_batch = torch.randn(64, 3, 224, 224, device=device)
+    dummy_batch = torch.randn(8, 3, 224, 224, device=device)
 
     logits = model(dummy_batch)
     loss = logits.sum()
@@ -162,6 +179,6 @@ if __name__ == "__main__":
 
     print(f"Config          : {m_cfg}")
     print(f"Trainable params: {model.num_trainable_params:,}")
-    print(f"Output logits   : shape={tuple(logits.shape)}, dtype={logits.dtype}")
+    print(f"Output logits   : shape={tuple(logits.shape)}, dtype={logits.dtype}, std={logits.std().item():.4f}")
     print(f"RNN hh grad     : mean_abs={rnn_hh_grad.abs().mean().item():.6f}")
     print(f"First conv grad : mean_abs={first_conv_grad.abs().mean().item():.6f}")

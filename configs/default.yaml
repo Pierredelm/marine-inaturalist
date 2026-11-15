@@ -1,4 +1,4 @@
-﻿# Central configuration for marine-inaturalist
+# Central configuration for marine-inaturalist
 
 paths:
   data_root: "C:/Users/pdelm/datasets/marine-inaturalist"
@@ -13,6 +13,7 @@ data:
   sample_fraction: 0.02
   val_ratio: 0.20
   image_size: 224
+  decode_min_side: 256   # JPEG draft decode target; keep >= image_size * 256/224
   num_classes: 2185
 
 download:
@@ -22,20 +23,23 @@ download:
 model:
   in_channels: 3
   base_channels: 32
+  rnn_type: "rnn"          # "rnn" | "gru" | "lstm" (switch to "gru" if still unstable)
   rnn_hidden_size: 256
   rnn_layers: 2
-  rnn_nonlinearity: "tanh"
+  rnn_nonlinearity: "tanh" # only used when rnn_type == "rnn"
   bidirectional: true
   dropout: 0.3
 
 train:
-  epochs: 15
+  epochs: 20
   batch_size: 64
-  num_workers: 4
+  num_workers: 4           # try 6-8 if GPU utilisation is low
   prefetch_factor: 2
   channels_last: true
-  lr: 0.0015
-  weight_decay: 0.0001
+  lr: 0.001                # was 0.0015: too high for Adam from scratch
+  warmup_epochs: 1.0       # linear warmup, then cosine (stepped per batch)
+  min_lr_ratio: 0.01       # cosine floor = lr * min_lr_ratio
+  weight_decay: 0.05       # applied to weights only (not BN/LayerNorm/bias)
   label_smoothing: 0.1
   max_grad_norm: 1.0
   use_amp: true

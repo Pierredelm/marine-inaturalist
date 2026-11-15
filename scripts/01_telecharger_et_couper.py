@@ -1,5 +1,5 @@
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict 
+from concurrent.futures import ThreadPoolExecutor, as_completed #mettre des jobs en back to back sur un thread
 import csv
 import io
 import json
@@ -29,33 +29,33 @@ def parse_keys_file(keys_path: Path) -> dict[str, list[tuple[str, str]]]:
                 "https://inaturalist-open-data.s3.amazonaws.com/",
             )
             by_species[species].append((stem, https_url))
-    return by_species
+    return by_species #renvoie le dico des races avec le chemin où stocker image et l'url par espèce
 
 
 def download_and_sanitize(
     task: tuple[str, str, Path], timeout_sec: int
 ) -> tuple[str, Path] | None:
     """Télécharge une image, la valide avec PIL et la sauvegarde en JPEG RGB propre."""
-    species, url, out_path = task
+    species, url, out_path = task #task sera une entrée du dico
 
-    # Reprise automatique : si le fichier valide existe déjà sur disque, on passe
+    #Reprise automatique : si le fichier valide existe déjà sur disque, on passe
     if out_path.exists() and out_path.stat().st_size > 0:
         return (species, out_path)
 
     try:
-        with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
-            raw_bytes = resp.read()
-        with Image.open(io.BytesIO(raw_bytes)) as img:
-            img_rgb = img.convert("RGB")
-            img_rgb.save(out_path, format="JPEG", quality=92)
-        return (species, out_path)
+        with urllib.request.urlopen(url, timeout=timeout_sec) as resp: #gerer les timeout/deco tu kone
+            raw_bytes = resp.read()# chopper la réponse serveur (bytes)
+        with Image.open(io.BytesIO(raw_bytes)) as img: #en faire une image
+            img_rgb = img.convert("RGB")# la transfo en RGB
+            img_rgb.save(out_path, format="JPEG", quality=92)#la transfo en jpeg, de qualité 92%
+        return (species, out_path) #renvoie tuple du nom de l'espèce et de là où elle a été sauvegardé
     except Exception:
         if out_path.exists():
             out_path.unlink(missing_ok=True)
         return None
 
 
-def write_manifest(csv_path: Path, rows: list[tuple[str, str, int]]) -> None:
+def write_manifest(csv_path: Path, rows: list[tuple[str, str, int]]) -> None:#résumé des opérations
     with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["image_path", "species", "label"])
@@ -63,7 +63,7 @@ def write_manifest(csv_path: Path, rows: list[tuple[str, str, int]]) -> None:
 
 
 def main() -> None:
-    cfg = load_config()
+    cfg = load_config() #yaml typeshit
     keys_path = Path(cfg["paths"]["keys_file"])
     images_dir = Path(cfg["paths"]["images_dir"])
     manifests_dir = Path(cfg["paths"]["manifests_dir"])
@@ -77,8 +77,8 @@ def main() -> None:
     manifests_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
 
-    print("1/3 Lecture et échantillonnage stratifié de train_keys.txt...")
-    by_species = parse_keys_file(keys_path)
+    print("1/3 Lecture et échantillonnage stratifié de train_keys.txt...") #blalabalabala en gros récupérer les noms/urls/path out en parsant les keys
+    by_species = parse_keys_file(keys_path) #et aussi setup les détails d'execution parallèle et timeout
 
     tasks: list[tuple[str, str, Path]] = []
     for species, items in sorted(by_species.items()):
@@ -96,7 +96,7 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(download_and_sanitize, task, timeout_sec)
+            executor.submit(download_and_sanitize, task, timeout_sec) #on choppe, on clean
             for task in tasks
         ]
         for future in tqdm(as_completed(futures), total=len(futures), unit="img"):
@@ -111,7 +111,7 @@ def main() -> None:
 
     print("3/3 Découpage stratifié train / val et écriture des manifestes...")
     classes = sorted(valid_by_species.keys())
-    class_to_idx = {cls_name: idx for idx, cls_name in enumerate(classes)}
+    class_to_idx = {cls_name: idx for idx, cls_name in enumerate(classes)} #a mettre dans un big json du manifest
 
     train_rows: list[tuple[str, str, int]] = []
     val_rows: list[tuple[str, str, int]] = []
@@ -130,7 +130,7 @@ def main() -> None:
     write_manifest(manifests_dir / "train.csv", train_rows)
     write_manifest(manifests_dir / "val.csv", val_rows)
     with open(manifests_dir / "class_to_idx.json", mode="w", encoding="utf-8") as f:
-        json.dump(class_to_idx, f, indent=2)
+        json.dump(class_to_idx, f, indent=2) #manifest garde en mémoire le json de quelle classe est indicée comment
 
     print(f"Manifestes prêts dans {manifests_dir} :")
     print(f"  - train.csv : {len(train_rows)} images")
