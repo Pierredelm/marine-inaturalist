@@ -1,4 +1,4 @@
-# Central configuration for marine-inaturalist
+﻿# Central configuration for marine-inaturalist
 
 paths:
   data_root: "C:/Users/pdelm/datasets/marine-inaturalist"
@@ -10,14 +10,14 @@ paths:
 
 data:
   seed: 42
-  sample_fraction: 0.02
+  sample_fraction: 0.22    # ~22 Go (~1.35M images à ~16 Ko/img)
   val_ratio: 0.20
   image_size: 224
   decode_min_side: 256   # JPEG draft decode target; keep >= image_size * 256/224
   num_classes: 2185
 
 download:
-  max_workers: 16
+  max_workers: 32          # augmenté de 16 -> 32 pour absorber la latence HTTPS sur ~1.2M nouvelles vignettes
   timeout_sec: 10
 
 model:

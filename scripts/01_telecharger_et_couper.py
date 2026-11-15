@@ -32,6 +32,20 @@ def parse_keys_file(keys_path: Path) -> dict[str, list[tuple[str, str]]]:
     return by_species #renvoie le dico des races avec le chemin où stocker image et l'url par espèce
 
 
+def load_existing_splits(manifests_dir: Path) -> dict[tuple[str, str], str]:
+    """Récupère les affectations train/val existantes pour éviter toute fuite de données."""
+    existing: dict[tuple[str, str], str] = {}
+    for split_name, csv_name in (("train", "train.csv"), ("val", "val.csv")):
+        csv_path = manifests_dir / csv_name
+        if not csv_path.exists():
+            continue
+        with open(csv_path, mode="r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                stem = Path(row["image_path"]).stem
+                existing[(row["species"], stem)] = split_name
+    return existing
+
+
 def download_and_sanitize(
     task: tuple[str, str, Path], timeout_sec: int
 ) -> tuple[str, Path] | None:
@@ -76,19 +90,37 @@ def main() -> None:
 
     manifests_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
+    existing_splits = load_existing_splits(manifests_dir)
 
     print("1/3 Lecture et échantillonnage stratifié de train_keys.txt...") #blalabalabala en gros récupérer les noms/urls/path out en parsant les keys
     by_species = parse_keys_file(keys_path) #et aussi setup les détails d'execution parallèle et timeout
 
     tasks: list[tuple[str, str, Path]] = []
+    already_cached = 0
     for species, items in sorted(by_species.items()):
-        (images_dir / species).mkdir(parents=True, exist_ok=True)
+        species_dir = images_dir / species
+        species_dir.mkdir(parents=True, exist_ok=True)
         k = max(1, int(len(items) * sample_fraction))
-        for stem, url in rng.sample(items, k):
-            tasks.append((species, url, images_dir / species / f"{stem}.jpg"))
+
+        # On garde en priorité les images déjà téléchargées (ex: run 2%) pour ne rien perdre
+        existing_items: list[tuple[str, str]] = []
+        remaining_items: list[tuple[str, str]] = []
+        for stem, url in items:
+            out_path = species_dir / f"{stem}.jpg"
+            if out_path.exists() and out_path.stat().st_size > 0:
+                existing_items.append((stem, url))
+            else:
+                remaining_items.append((stem, url))
+
+        already_cached += len(existing_items)
+        need_more = max(0, k - len(existing_items))
+        sampled_new = rng.sample(remaining_items, min(need_more, len(remaining_items)))
+
+        for stem, url in existing_items + sampled_new:
+            tasks.append((species, url, species_dir / f"{stem}.jpg"))
 
     print(
-        f"2/3 Téléchargement de {len(tasks)} images ({sample_fraction:.1%}) "
+        f"2/3 Téléchargement de {len(tasks)} images ({sample_fraction:.1%}, dont {already_cached} déjà sur disque) "
         f"sur {len(by_species)} espèces avec {max_workers} threads..."
     )
     valid_by_species: dict[str, list[Path]] = defaultdict(list)
@@ -111,25 +143,47 @@ def main() -> None:
 
     print("3/3 Découpage stratifié train / val et écriture des manifestes...")
     classes = sorted(valid_by_species.keys())
-    class_to_idx = {cls_name: idx for idx, cls_name in enumerate(classes)} #a mettre dans un big json du manifest
+
+    # Conserve l'indexation existante des classes si class_to_idx.json existe déjà
+    class_to_idx_path = manifests_dir / "class_to_idx.json"
+    if class_to_idx_path.exists():
+        with open(class_to_idx_path, mode="r", encoding="utf-8") as f:
+            class_to_idx: dict[str, int] = json.load(f)
+        next_idx = max(class_to_idx.values(), default=-1) + 1
+        for cls_name in classes:
+            if cls_name not in class_to_idx:
+                class_to_idx[cls_name] = next_idx
+                next_idx += 1
+    else:
+        class_to_idx = {cls_name: idx for idx, cls_name in enumerate(classes)} #a mettre dans un big json du manifest
 
     train_rows: list[tuple[str, str, int]] = []
     val_rows: list[tuple[str, str, int]] = []
 
     for cls_name in classes:
         paths = sorted(valid_by_species[cls_name])
-        rng.shuffle(paths)
-        n_val = max(1, int(len(paths) * val_ratio)) if len(paths) > 1 else 0
         label = class_to_idx[cls_name]
 
-        for p in paths[:n_val]:
+        # Épingle les anciens splits train/val et ne découpe que les nouvelles images
+        pinned_val = [p for p in paths if existing_splits.get((cls_name, p.stem)) == "val"]
+        pinned_train = [p for p in paths if existing_splits.get((cls_name, p.stem)) == "train"]
+        new_paths = [p for p in paths if (cls_name, p.stem) not in existing_splits]
+
+        rng.shuffle(new_paths)
+        n_val_total = max(1, int(len(paths) * val_ratio)) if len(paths) > 1 else 0
+        n_val_needed = max(0, n_val_total - len(pinned_val))
+
+        final_val = sorted(pinned_val) + new_paths[:n_val_needed]
+        final_train = sorted(pinned_train) + new_paths[n_val_needed:]
+
+        for p in final_val:
             val_rows.append((str(p), cls_name, label))
-        for p in paths[n_val:]:
+        for p in final_train:
             train_rows.append((str(p), cls_name, label))
 
     write_manifest(manifests_dir / "train.csv", train_rows)
     write_manifest(manifests_dir / "val.csv", val_rows)
-    with open(manifests_dir / "class_to_idx.json", mode="w", encoding="utf-8") as f:
+    with open(class_to_idx_path, mode="w", encoding="utf-8") as f:
         json.dump(class_to_idx, f, indent=2) #manifest garde en mémoire le json de quelle classe est indicée comment
 
     print(f"Manifestes prêts dans {manifests_dir} :")
