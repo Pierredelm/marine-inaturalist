@@ -1,0 +1,21 @@
+﻿# Environnement virtuel
+.venv/
+venv/
+
+# Données lourdes, poids des modèles et logs
+data/
+checkpoints/
+logs/
+*.pt
+*.pth
+*.csv
+*.zip
+*.tar
+
+# Clés d'API et secrets
+kaggle.json
+.env
+
+# Cache Python
+__pycache__/
+*.py[cod]
