@@ -1,0 +1,18 @@
+﻿# Configuration centrale du projet marine-inaturalist
+
+paths:
+  data_root: "C:/Users/pdelm/datasets/marine-inaturalist"
+  keys_file: "C:/Users/pdelm/datasets/marine-inaturalist/train_keys.txt"
+  images_dir: "C:/Users/pdelm/datasets/marine-inaturalist/images"
+  manifests_dir: "C:/Users/pdelm/datasets/marine-inaturalist/manifests"
+
+data:
+  seed: 42
+  sample_fraction: 0.02      # 2% du dataset (~122k images, ~4.5 Go)
+  val_ratio: 0.20            # 20% de l'échantillon réservé à la validation
+  image_size: 224            # Taille cible (224x224) pour l'entrée du réseau
+  num_classes: 2185
+
+download:
+  max_workers: 16            # Nombre de téléchargements simultanés (threads)
+  timeout_sec: 10            # Délai max avant d'abandonner une image bloquée
