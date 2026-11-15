@@ -6,6 +6,7 @@ paths:
   images_dir: "C:/Users/pdelm/datasets/marine-inaturalist/images"
   manifests_dir: "C:/Users/pdelm/datasets/marine-inaturalist/manifests"
   checkpoints_dir: "C:/Users/pdelm/datasets/marine-inaturalist/checkpoints"
+  logs_dir: "C:/Users/pdelm/datasets/marine-inaturalist/logs"
 
 data:
   seed: 42
@@ -31,7 +32,9 @@ train:
   epochs: 15
   batch_size: 64
   num_workers: 4
-  lr: 0.001
+  prefetch_factor: 2
+  channels_last: true
+  lr: 0.0015
   weight_decay: 0.0001
   label_smoothing: 0.1
   max_grad_norm: 1.0
