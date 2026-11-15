@@ -1,0 +1,16 @@
+﻿[project]
+name = "marine-inaturalist"
+version = "0.2.0"
+description = "Marine iNaturalist image classification in PyTorch"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "albumentations",
+    "pyyaml",
+    "tqdm",
+    "pillow",
+    "numpy",
+    "kaggle",
+    "six",
+]

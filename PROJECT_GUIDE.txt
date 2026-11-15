@@ -1,0 +1,135 @@
+﻿================================================================================
+MARINE-INATURALIST — COMPLETE CODEBASE & ARCHITECTURE GUIDE (ELI5 + TECHNICAL)
+================================================================================
+
+1. WHY THIS STRUCTURE? (NOTEBOOK VS. MODULAR DEMONSTRATOR)
+--------------------------------------------------------------------------------
+In a Jupyter notebook, data loading, model math, training loops, and file paths
+are mixed in one file. That works for quick experiments, but breaks when you
+move from a Windows laptop (RTX 4060) to a MacBook (MPS) or a Linux multi-GPU
+cluster (DDP).
+
+This repo separates responsibilities into three layers:
+  - configs/  : The single source of truth for numbers and paths.
+  - src/      : Reusable Python packages (imported as modules).
+  - scripts/  : Thin command-line entry points that wire src/ together.
+
+Always run scripts from the repo root using python -m ... so Python resolves
+src.* imports cleanly.
+
+
+2. CONFIGURATION & INFRASTRUCTURE (configs/ & src/utils/)
+--------------------------------------------------------------------------------
+[configs/default.yaml]
+  - What it does: Stores every path, dataset parameter, model dimension, and
+    training hyperparameter in one human-readable file.
+  - Why it matters: You never hunt through .py files to change a learning rate
+    or batch size.
+
+[src/utils/config.py]
+  - What it does: Loads configs/default.yaml into a Python dictionary.
+  - Key feature: Checks the MARINE_DATA_ROOT environment variable (or
+    --data-root CLI flag). On a cluster or Mac, you set one path and all 6
+    subfolders (images, manifests, checkpoints, logs) relocate cleanly.
+
+[src/utils/device.py]
+  - What it does: Automatically picks the best compute hardware in priority order:
+      1. Multi-GPU Cluster (	orchrun -> DistributedDataParallel / NCCL)
+      2. NVIDIA GPU (cuda -> your RTX 4060, with FP16 mixed precision)
+      3. Apple Silicon (mps -> MacBook GPU)
+      4. cpu fallback
+  - Why it matters: Zero .cuda() calls exist anywhere in the codebase.
+
+[src/utils/checkpoint.py]
+  - What it does: Saves full training snapshots (cnn_rnn_last.pt every epoch
+    and cnn_rnn_best.pt whenever validation Macro-F1 improves).
+  - Crash-safety trick ("Atomic Write"): Saves to a temporary .tmp file first,
+    then renames it over last.pt via os.replace(). Renaming on a filesystem
+    is instantaneous—if you press Ctrl+C or a cluster job times out mid-save,
+    you never end up with a half-written corrupted file.
+  - Full state: Saves model weights, optimizer momentum, LR scheduler step,
+    AMP scaler, epoch number, and Python/NumPy/PyTorch random seeds so --resume
+    continues as if nothing happened.
+
+[src/utils/logger.py] & [src/utils/visualize.py]
+  - logger.py appends one row per epoch to logs/metrics.csv and writes full
+    Python stack traces to logs/crash.log if an error occurs.
+  - isualize.py reads logs/metrics.csv and renders a 4-panel chart
+    (logs/training_curves.png) using Matplotlib's headless Agg backend.
+
+
+3. DATA PIPELINE (src/data/)
+--------------------------------------------------------------------------------
+[src/data/transforms.py]
+  - What it does: Uses Albumentations to turn raw HxWxC uint8 NumPy images
+    into normalized (3, 224, 224) PyTorch float32 tensors.
+  - Design pattern: TransformConfig (@dataclass) holds settings;
+    BaseTransformBuilder (ABC) enforces uild_train() and uild_val().
+  - Train vs. Val:
+      * Train: Scales shorter side to 256px (preserving aspect ratio so fish/corals
+        are not squashed), takes a random 224x224 crop, applies random horizontal
+        flips and mild color jitter, then normalizes pixel values.
+      * Val: Deterministic 256px resize + center 224x224 crop + normalize.
+
+[src/data/dataset.py]
+  - What it does: Reads 	rain.csv and al.csv into lightweight, immutable
+    SampleRecord objects (@dataclass(frozen=True, slots=True)—saves gigabytes
+    of RAM when scaling to all 6.12M images on a cluster).
+  - DataLoader workers: Uses background CPU processes (
+um_workers) to read
+    JPEGs from disk and apply transforms while the GPU trains on the current batch.
+    On Windows, workers use spawn (fresh Python processes), which is why every
+    script protects its entry point with if __name__ == "__main__":.
+
+
+4. FROM-SCRATCH MODEL & TRAINING ENGINE (src/models/ & src/training/)
+--------------------------------------------------------------------------------
+[src/models/cnn_rnn.py]
+  - What it does: A from-scratch hybrid vision classifier (6.58M parameters).
+  - Step-by-step tensor flow:
+      1. Input batch: (B, 3, 224, 224)
+      2. 5-stage Conv Encoder (Conv2d -> BatchNorm2d -> ReLU -> MaxPool2d):
+         Downsamples spatial dimensions 224 -> 112 -> 56 -> 28 -> 14 -> 7 while
+         growing feature channels 3 -> 32 -> 64 -> 128 -> 256 -> 512.
+      3. Spatial-to-Sequence bridge: Flattens the 7x7 feature map into 49
+         spatial tokens of dimension 512: (B, 49, 512).
+      4. 2-layer Bidirectional Vanilla RNN (	anh): Scans across all 49 spatial
+         patches forward and backward, outputting (B, 49, 512).
+      5. Mean pooling across the 49 steps + Dropout + Linear head -> (B, 2185)
+         raw class logits.
+  - Initialization (init_weights): No pretrained weights are used. Conv/Linear
+    layers use He (Kaiming) initialization for ReLU; RNN hidden-to-hidden matrices
+    use orthogonal initialization so gradients survive 49 unrolled steps.
+
+[src/training/metrics.py] & [src/training/trainer.py]
+  - metrics.py: Computes Top-1 Accuracy and Macro-F1 using 	orch.bincount.
+    Macro-F1 averages F1 equally across all 2,185 species so rare species (900
+    images) count just as much as common ones (10,000 images).
+  - 	rainer.py: Runs the PyTorch training loop with:
+      * FP16 Mixed Precision (utocast + GradScaler) for faster RTX 4060 math.
+      * Gradient clipping (clip_grad_norm_) to keep the vanilla RNN stable.
+      * overfit_single_batch(): Memorizes 1 batch of 64 images to verify the
+        entire pipeline before multi-epoch runs.
+
+
+5. EXECUTABLE SCRIPTS & CHEAT SHEET (scripts/)
+--------------------------------------------------------------------------------
+- scripts/00_inspecter_cles.py
+    Audits the 6.12M lines of 	rain_keys.txt and tests downloading 1 S3 image.
+
+- scripts/01_download_and_split.py
+    Downloads a stratified sample (2% = ~122k images) in parallel with 16 threads,
+    converts .gif/.png/.jpg safely into RGB JPEGs, and writes 	rain.csv,
+    al.csv, and class_to_idx.json.
+
+- scripts/02_train.py
+    Main training CLI:
+      * Fresh run:   python -m scripts.02_train --epochs 15
+      * Resume run:  python -m scripts.02_train --epochs 15 --resume <path/to/cnn_rnn_last.pt>
+      * Cluster DDP: 	orchrun --nproc_per_node=4 -m scripts.02_train --data-root /scratch/data
+
+- scripts/03_evaluate.py
+    Loads cnn_rnn_best.pt for validation diagnostics or Kaggle test submission:
+      * Val report:  python -m scripts.03_evaluate --mode val
+      * Test submit: python -m scripts.03_evaluate --mode test --test-dir <path/to/test>
+================================================================================
