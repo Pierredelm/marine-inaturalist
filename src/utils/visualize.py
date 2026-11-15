@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) #encore et tjrs dataclass immutable pour tenir l'historique -> éviter de switch tout une série, on peut par contre ajouter/supprimer un petit élément.
 class TrainingHistory:
     epochs: list[int]
     lr: list[float]
@@ -17,7 +17,7 @@ class TrainingHistory:
     val_acc: list[float]
     val_macro_f1: list[float]
 
-    @classmethod
+    @classmethod #créer la dataclass à partir de la donnée à la volée
     def from_csv(cls, csv_path: str | Path) -> "TrainingHistory":
         path = Path(csv_path)
         if not path.exists():
@@ -43,8 +43,8 @@ class CurvePlotter:
         self.csv_path = self.logs_dir / "metrics.csv"
         self.out_path = self.logs_dir / "training_curves.png"
 
-    def plot(self) -> Path:
-        h = TrainingHistory.from_csv(self.csv_path)
+    def plot(self) -> Path: #va chopper toute les données dans les dataclass du log (qui vivent dans un csv)
+        h = TrainingHistory.from_csv(self.csv_path) 
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
         axes[0, 0].plot(h.epochs, h.train_loss, marker="o", label="Train Loss")

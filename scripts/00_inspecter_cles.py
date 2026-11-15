@@ -5,28 +5,28 @@ import io
 from PIL import Image
 import numpy as np
 
-# 1. Chemin vers le fichier téléchargé (en dehors du dépôt Git)
+# Chemin vers data (hors dir du projet, en local)// même que sur le yaml
 KEYS_PATH = Path(r"C:\Users\pdelm\datasets\marine-inaturalist\train_keys.txt")
 
-species_counts = Counter()
-extensions = Counter()
+species_counts = Counter() #nb d'espèces
+extensions = Counter() # png, jpg, gif... > compteur
 first_sample = None
 total_rows = 0
 
-# 2. Lecture ligne par ligne (économise la RAM même sur des millions de lignes)
+# Lecture clés ligne à ligne
 with open(KEYS_PATH, mode="r", encoding="utf-8") as f:
-    for line in f:
+    for line in f: #une ligne = une instance (ex : greyfish,img0001,S3.URL.jpg)
         line = line.strip()
         if not line:
             continue
         
-        # rsplit(",", 2) découpe depuis la droite : protège contre d'éventuelles virgules dans le nom d'espèce
+        # de droite > gauche pour faire gaffe si y'a une virgule dans le nom de l'espèce
         species_raw, filename, s3_uri = line.rsplit(",", 2)
         
-        # Nettoyage des espaces et de l'antislash ("Abramis\ brama" -> "Abramis_brama")
-        species = species_raw.strip().replace(r"\ ", "_")
-        filename = filename.strip()
-        s3_uri = s3_uri.strip()
+        # cleaning sesh
+        species = species_raw.strip().replace(r"\ ", "_") #tej slash
+        filename = filename.strip() #tej espaces insécables
+        s3_uri = s3_uri.strip() # same
         
         species_counts[species] += 1
         extensions[Path(filename).suffix.lower()] += 1
@@ -47,13 +47,13 @@ print("\nTop 5 des espèces les plus rares :")
 for sp, count in species_counts.most_common()[-5:]:
     print(f"  - {sp} : {count} images")
 
-# 3. Test de téléchargement sur UNE seule image (en mémoire, sans écrire sur le disque)
+# aller chopper un sample pour voir sa tête un peu
 if first_sample:
-    species, filename, s3_uri = first_sample
+    species, filename, s3_uri = first_sample  #recup coordonnées
     https_url = s3_uri.replace(
         "s3://inaturalist-open-data/",
         "https://inaturalist-open-data.s3.amazonaws.com/"
-    )
+    ) #fr fr
     print(f"\nTest de téléchargement pour [{species}] :")
     print(f"  URL : {https_url}")
     
@@ -64,3 +64,4 @@ if first_sample:
         img_rgb = img.convert("RGB")
         arr = np.array(img_rgb)
         print(f"  Succès ! Poids={len(image_bytes)/1024:.1f} Ko | Taille PIL (W,H)={img.size} | NumPy (H,W,C)={arr.shape}")
+        # Height, Width, Channels

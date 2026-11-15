@@ -19,16 +19,16 @@ class ExperimentLogger:
     ]
 
     def __init__(self, logs_dir: str | Path, enabled: bool = True) -> None:
-        self.logs_dir = Path(logs_dir)
-        self.enabled = enabled
-        self.csv_path = self.logs_dir / "metrics.csv"
-        self.crash_path = self.logs_dir / "crash.log"
+        self.logs_dir = Path(logs_dir)#où il vit
+        self.enabled = enabled# en marche?
+        self.csv_path = self.logs_dir / "metrics.csv" #le nom chemin csv des données
+        self.crash_path = self.logs_dir / "crash.log" # nom log
 
-        if self.enabled:
-            self.logs_dir.mkdir(parents=True, exist_ok=True)
+        if self.enabled: # si existe
+            self.logs_dir.mkdir(parents=True, exist_ok=True) #crée le dir sans remplacer si existe déja et en créant les parents s'ils n'existent pas
             if not self.csv_path.exists():
                 with open(self.csv_path, mode="w", newline="", encoding="utf-8") as f:
-                    csv.writer(f).writerow(self.HEADER)
+                    csv.writer(f).writerow(self.HEADER) # rajoute un évènement avec tout le payload (timestamp, f1, epochs... des noms)
 
     def log_epoch(
         self,
@@ -52,7 +52,7 @@ class ExperimentLogger:
             f"{val_m.macro_f1:.6f}",
         ]
         with open(self.csv_path, mode="a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(row)
+            csv.writer(f).writerow(row) #envoyer cette fois ci la ligne avec le payload
 
     def log_exception(self, exc: BaseException) -> None:
         if not self.enabled:
@@ -60,4 +60,4 @@ class ExperimentLogger:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         with open(self.crash_path, mode="a", encoding="utf-8") as f:
             f.write(f"\n--- CRASH @ {datetime.now().isoformat()} ---\n")
-            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))#exc.__traceback__ renvoie le module qui a merdé

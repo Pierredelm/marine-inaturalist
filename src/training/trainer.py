@@ -1,5 +1,6 @@
-﻿from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import time
 import torch
@@ -17,9 +18,11 @@ from src.utils.logger import ExperimentLogger
 
 @dataclass(frozen=True)
 class TrainConfig:
-    epochs: int = 15
-    lr: float = 1.5e-3
-    weight_decay: float = 1e-4
+    epochs: int = 20
+    lr: float = 1e-3
+    warmup_epochs: float = 1.0
+    min_lr_ratio: float = 0.01
+    weight_decay: float = 0.05
     label_smoothing: float = 0.1
     max_grad_norm: float = 1.0
     use_amp: bool = True
@@ -32,9 +35,11 @@ class TrainConfig:
         train_cfg = cfg.get("train", {})
         paths_cfg = cfg.get("paths", {})
         return cls(
-            epochs=int(train_cfg.get("epochs", 15)),
-            lr=float(train_cfg.get("lr", 1.5e-3)),
-            weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
+            epochs=int(train_cfg.get("epochs", 20)),
+            lr=float(train_cfg.get("lr", 1e-3)),
+            warmup_epochs=float(train_cfg.get("warmup_epochs", 1.0)),
+            min_lr_ratio=float(train_cfg.get("min_lr_ratio", 0.01)),
+            weight_decay=float(train_cfg.get("weight_decay", 0.05)),
             label_smoothing=float(train_cfg.get("label_smoothing", 0.1)),
             max_grad_norm=float(train_cfg.get("max_grad_norm", 1.0)),
             use_amp=bool(train_cfg.get("use_amp", True)),
@@ -83,39 +88,65 @@ class MarineTrainer(BaseTrainer):
     ) -> None:
         super().__init__(model, config, device_ctx)
         self.criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=config.lr,
-            weight_decay=config.weight_decay,
-        )
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=max(1, config.epochs),
-        )
+        self.optimizer = torch.optim.AdamW(self._build_param_groups(), lr=config.lr)
+        self.scheduler: torch.optim.lr_scheduler.LRScheduler | None = None  # built in fit()
         self.scaler = self.ctx.create_scaler()
         self.tracker = ClassificationMetricTracker(num_classes=self.num_classes)
         self.ckpt_manager = CheckpointManager(config.checkpoints_dir, prefix="cnn_rnn")
         self.logger = ExperimentLogger(config.logs_dir, enabled=self.ctx.is_main_process)
+        self.skipped_steps = 0
+
+    def _build_param_groups(self) -> list[dict]:
+        """No weight decay on BatchNorm/LayerNorm scales and biases (all 1-D params)."""
+        decay, no_decay = [], []
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            (no_decay if p.ndim < 2 else decay).append(p)
+        return [
+            {"params": decay, "weight_decay": self.config.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
+
+    def _build_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LRScheduler:
+        """Linear warmup then cosine decay to lr * min_lr_ratio, stepped once per batch."""
+        total_steps = max(1, self.config.epochs * steps_per_epoch)
+        warmup_steps = int(self.config.warmup_epochs * steps_per_epoch)
+        floor = self.config.min_lr_ratio
+
+        def lr_lambda(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                return (step + 1) / warmup_steps
+            progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
+            return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
     def _to_device_batch(self, images: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         images = images.to(self.ctx.device, memory_format=self.memory_format, non_blocking=True)
         labels = labels.to(self.ctx.device, non_blocking=True)
         return images, labels
 
-    def _step_batch(self, images: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, float]:
+    def _step_batch(self, images: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, float, float]:
         self.optimizer.zero_grad(set_to_none=True)
 
         with self.ctx.autocast():
             logits = self.model(images)
             loss = self.criterion(logits, labels)
 
+        loss_val = float(loss.item())
+        if not math.isfinite(loss_val):
+            # Never backprop a NaN/Inf loss: it would poison the Adam moment estimates.
+            self.skipped_steps += 1
+            return logits.detach(), loss_val, float("nan")
+
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return logits.detach(), float(loss.item())
+        return logits.detach(), loss_val, float(grad_norm)
 
     def train_epoch(self, loader: DataLoader, epoch: int) -> EpochMetrics:
         if isinstance(loader.sampler, DistributedSampler):
@@ -123,6 +154,7 @@ class MarineTrainer(BaseTrainer):
 
         self.model.train()
         self.tracker.reset()
+        self.skipped_steps = 0
 
         iterator = (
             tqdm(loader, desc=f"Epoch {epoch:02d}/{self.config.epochs:02d} [Train]", leave=False)
@@ -131,11 +163,20 @@ class MarineTrainer(BaseTrainer):
         )
         for images, labels in iterator:
             images, labels = self._to_device_batch(images, labels)
-            logits, loss_val = self._step_batch(images, labels)
-            self.tracker.update(logits, labels, loss_val)
-            if self.ctx.is_main_process:
-                iterator.set_postfix(loss=f"{loss_val:.4f}")
+            logits, loss_val, grad_norm = self._step_batch(images, labels)
+            self.scheduler.step()  # per-batch schedule (kept aligned even if a step was skipped)
 
+            if math.isfinite(loss_val):
+                self.tracker.update(logits, labels, loss_val)
+            if self.ctx.is_main_process:
+                iterator.set_postfix(
+                    loss=f"{loss_val:.4f}",
+                    gn=f"{grad_norm:.2f}",
+                    lr=f"{self.optimizer.param_groups[0]['lr']:.2e}",
+                )
+
+        if self.skipped_steps and self.ctx.is_main_process:
+            print(f"  [warn] {self.skipped_steps} non-finite-loss batches skipped in epoch {epoch}")
         return self.tracker.compute()
 
     @torch.no_grad()
@@ -162,6 +203,9 @@ class MarineTrainer(BaseTrainer):
         start_epoch = 1
         best_f1 = -1.0
 
+        # Scheduler must exist before a resume so its state can be restored.
+        self.scheduler = self._build_scheduler(steps_per_epoch=len(train_loader))
+
         if resume_path is not None:
             resume_state = self.ckpt_manager.load(
                 checkpoint_path=resume_path,
@@ -182,7 +226,6 @@ class MarineTrainer(BaseTrainer):
                 train_m = self.train_epoch(train_loader, epoch)
                 val_m = self.validate(val_loader)
                 current_lr = self.optimizer.param_groups[0]["lr"]
-                self.scheduler.step()
                 elapsed = time.perf_counter() - t0
 
                 if self.ctx.is_main_process:

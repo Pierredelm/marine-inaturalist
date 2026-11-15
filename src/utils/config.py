@@ -2,6 +2,8 @@
 from pathlib import Path
 import yaml
 
+#on fait juste ça pour l"éventualité où on ne part pas sur le yaml habituel
+# permet d'intercepter la config et de changer un détail sans réécrire le yaml
 
 def load_config(
     config_path: str | Path = "configs/default.yaml",
@@ -16,7 +18,7 @@ def load_config(
         config = yaml.safe_load(f)
 
     root_override = data_root_override or os.environ.get("MARINE_DATA_ROOT")
-    if root_override:
+    if root_override:  #décider de réécrire les options alors allons chercher
         root = Path(root_override)
         paths = config.setdefault("paths", {})
         paths["data_root"] = str(root)

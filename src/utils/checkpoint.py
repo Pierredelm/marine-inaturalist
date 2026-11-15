@@ -7,8 +7,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+####### Reprendre à un checkpoint si l'on connait un problème
+# qu'est ce qu'il faut reprendre (.pt file): 
+# les poids du modele (model_stat_dict)
+# les poids du modèle adam (optimizer_state_dict)
+# là où en est LR (lr scheduler step count)
+# le référentiel pour la loss (AMP) ; scaler_state_dict
+# l'epoch et le meilleur score
+# l'historique des métriques (pour l'éval/viz)
+# l'état des pseudo aléatoire
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) #regarde start epoch et best metric et génère __init__, __repr__ et __eq__// frozen so that imutable within an object
+#is true based on the __eq__ (egale attribut)// __repr__ = values (represente), comment il est définit. frozen génère un hash (identifiant unique), on peut
+# hold les mêmes valeurs mais être distinct
 class ResumeState:
     start_epoch: int
     best_metric: float
@@ -16,8 +27,8 @@ class ResumeState:
 
 class CheckpointManager:
     def __init__(self, checkpoints_dir: str | Path, prefix: str = "cnn_rnn") -> None:
-        self.checkpoints_dir = Path(checkpoints_dir)
-        self.prefix = prefix
+        self.checkpoints_dir = Path(checkpoints_dir)  #literallement chemin vers les poids
+        self.prefix = prefix # soit best, soit last
         self.last_path = self.checkpoints_dir / f"{prefix}_last.pt"
         self.best_path = self.checkpoints_dir / f"{prefix}_best.pt"
 
@@ -30,11 +41,11 @@ class CheckpointManager:
         }
         if torch.cuda.is_available():
             state["cuda"] = torch.cuda.get_rng_state_all()
-        return state
+        return state #renvoie les au pifs sur tout les trucs auxquels on a pu appeler du au pif (numpy surtout en vrai)
 
     @staticmethod
-    def _restore_rng_state(state: dict[str, Any] | None) -> None:
-        if not state:
+    def _restore_rng_state(state: dict[str, Any] | None) -> None: #si on a planté, on amerait bien reprendre sur du pseudo aléatoire
+        if not state: #state définit l'aléatoire
             return
         if "python" in state:
             random.setstate(state["python"])
@@ -47,8 +58,8 @@ class CheckpointManager:
 
     @staticmethod
     def _unwrap_model(model: nn.Module) -> nn.Module:
-        return model.module if hasattr(model, "module") else model
-
+        return model.module if hasattr(model, "module") else model #si DDP (= faire tourner sur plusieurs GPU), alors on doit présenter modèle comme un attribut modèle
+# concrètement envoie tout mon modèle et ce qu'il contient (les layers norm, les conv, les rnn...)
     def save(
         self,
         model: nn.Module,
@@ -84,7 +95,7 @@ class CheckpointManager:
             torch.save(payload, tmp_best)
             os.replace(tmp_best, self.best_path)
 
-    def load(
+    def load(#module pour reprendre là où on était
         self,
         checkpoint_path: str | Path,
         model: nn.Module,
