@@ -13,7 +13,7 @@ from src.utils.config import load_config
 from src.utils.device import cleanup_device, setup_device
 
 
-def seed_everything(seed: int) -> None:
+def seed_everything(seed: int) -> None: #définir tout les random state (python/numpy/cuda/torch)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -44,11 +44,11 @@ class ExperimentRunner:
         self.train_cfg = train_cfg
 
     def run(self) -> None:
-        ctx = setup_device(use_amp=self.train_cfg.use_amp)
+        ctx = setup_device(use_amp=self.train_cfg.use_amp) #chopper device ctx
         try:
-            seed_everything(self.seed + ctx.rank)
+            seed_everything(self.seed + ctx.rank)  #initialiser les aléas
 
-            t_builder = MarineTransformBuilder(self.transform_cfg)
+            t_builder = MarineTransformBuilder(self.transform_cfg) #chopper les loaders
             train_loader, val_loader = create_dataloaders(
                 manifests_dir=self.raw_cfg["paths"]["manifests_dir"],
                 train_transform=t_builder.build_train(),
@@ -57,7 +57,7 @@ class ExperimentRunner:
                 is_distributed=ctx.is_distributed,
             )
 
-            model = CnnRnnClassifier(self.model_cfg)
+            model = CnnRnnClassifier(self.model_cfg)# définir tourner le modèle (agnostique)
             trainer = MarineTrainer(
                 model=model,
                 config=self.train_cfg,
@@ -72,9 +72,9 @@ class ExperimentRunner:
                     f"Epochs          : {self.train_cfg.epochs} | Batch size: {self.loader_cfg.batch_size} | "
                     f"Workers: {self.loader_cfg.num_workers} | Channels-Last: {self.train_cfg.channels_last}"
                 )
-                print("-" * 72)
+                print("-" * 72)# ---------------
 
-            trainer.fit(train_loader, val_loader, resume_path=self.args.resume)
+            trainer.fit(train_loader, val_loader, resume_path=self.args.resume) #faire tourner le modèle
         finally:
             cleanup_device(ctx)
 

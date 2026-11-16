@@ -54,7 +54,7 @@ src.* imports cleanly.
 [src/utils/logger.py] & [src/utils/visualize.py]
   - logger.py appends one row per epoch to logs/metrics.csv and writes full
     Python stack traces to logs/crash.log if an error occurs.
-  - isualize.py reads logs/metrics.csv and renders a 4-panel chart
+  -Visualize.py reads logs/metrics.csv and renders a 4-panel chart
     (logs/training_curves.png) using Matplotlib's headless Agg backend.
 
 
@@ -64,7 +64,7 @@ src.* imports cleanly.
   - What it does: Uses Albumentations to turn raw HxWxC uint8 NumPy images
     into normalized (3, 224, 224) PyTorch float32 tensors.
   - Design pattern: TransformConfig (@dataclass) holds settings;
-    BaseTransformBuilder (ABC) enforces uild_train() and uild_val().
+    BaseTransformBuilder (ABC) enforces Build_train() and Build_val().
   - Train vs. Val:
       * Train: Scales shorter side to 256px (preserving aspect ratio so fish/corals
         are not squashed), takes a random 224x224 crop, applies random horizontal
@@ -72,7 +72,7 @@ src.* imports cleanly.
       * Val: Deterministic 256px resize + center 224x224 crop + normalize.
 
 [src/data/dataset.py]
-  - What it does: Reads 	rain.csv and al.csv into lightweight, immutable
+  - What it does: Reads 	rain.csv and val.csv into lightweight, immutable
     SampleRecord objects (@dataclass(frozen=True, slots=True)—saves gigabytes
     of RAM when scaling to all 6.12M images on a cluster).
   - DataLoader workers: Uses background CPU processes (
@@ -106,7 +106,7 @@ um_workers) to read
     Macro-F1 averages F1 equally across all 2,185 species so rare species (900
     images) count just as much as common ones (10,000 images).
   - 	rainer.py: Runs the PyTorch training loop with:
-      * FP16 Mixed Precision (utocast + GradScaler) for faster RTX 4060 math.
+      * FP16 Mixed Precision (autocast + GradScaler) for faster RTX 4060 math.
       * Gradient clipping (clip_grad_norm_) to keep the vanilla RNN stable.
       * overfit_single_batch(): Memorizes 1 batch of 64 images to verify the
         entire pipeline before multi-epoch runs.
@@ -120,7 +120,7 @@ um_workers) to read
 - scripts/01_download_and_split.py
     Downloads a stratified sample (2% = ~122k images) in parallel with 16 threads,
     converts .gif/.png/.jpg safely into RGB JPEGs, and writes 	rain.csv,
-    al.csv, and class_to_idx.json.
+    val.csv, and class_to_idx.json.
 
 - scripts/02_train.py
     Main training CLI:
