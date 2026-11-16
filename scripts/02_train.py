@@ -4,6 +4,8 @@ from pathlib import Path
 import random
 import numpy as np
 import torch
+import os
+
 
 from src.data.dataset import LoaderConfig, create_dataloaders
 from src.data.transforms import MarineTransformBuilder, TransformConfig
@@ -12,6 +14,7 @@ from src.training.trainer import MarineTrainer, TrainConfig
 from src.utils.config import load_config
 from src.utils.device import cleanup_device, setup_device
 
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
 def seed_everything(seed: int) -> None: #définir tout les random state (python/numpy/cuda/torch)
     random.seed(seed)
