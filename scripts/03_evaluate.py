@@ -24,7 +24,7 @@ class UnlabeledImageDataset(Dataset):
             p for p in image_dir.rglob("*") if p.is_file() and p.suffix.lower() in self.IMAGE_EXTS
         )
         if not self.paths:
-            raise FileNotFoundError(f"No images found inside {image_dir.resolve()}")
+            raise FileNotFoundError(f"No images found inside {image_dir.resolve()}") #tej les formats qui vont pas
         self.transform = transform
 
     def __len__(self) -> int:
@@ -46,11 +46,11 @@ class ModelEvaluator:
         self.logs_dir = Path(cfg["paths"]["logs_dir"])
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        with open(self.manifests_dir / "class_to_idx.json", mode="r", encoding="utf-8") as f:
+        with open(self.manifests_dir / "class_to_idx.json", mode="r", encoding="utf-8") as f: #aller chercher les dir des données dans le manifest
             class_to_idx = json.load(f)
         self.idx_to_class = {int(idx): name for name, idx in class_to_idx.items()}
 
-        payload = torch.load(checkpoint_path, map_location=self.ctx.device, weights_only=False)
+        payload = torch.load(checkpoint_path, map_location=self.ctx.device, weights_only=False) #de mémoire contient plein d'infos sur le modèle type nb de workers, ddp, rank...
         model_cfg = payload.get("model_config") or ModelConfig.from_dict(cfg)
         self.model = CnnRnnClassifier(model_cfg).to(self.ctx.device)
         self.model.load_state_dict(payload["model_state_dict"])
@@ -72,6 +72,7 @@ class ModelEvaluator:
             pin_memory=(self.ctx.device.type == "cuda"),
         )
 
+# données de l'évaluation (nb évaluation, nb bien prédit/mal prédit)
         num_classes = len(self.idx_to_class)
         tp = torch.zeros(num_classes, dtype=torch.long)
         pred_count = torch.zeros(num_classes, dtype=torch.long)
