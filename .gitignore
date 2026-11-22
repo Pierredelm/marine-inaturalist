@@ -3,9 +3,9 @@
 venv/
 
 # Données lourdes, poids des modèles et logs
-data/
-checkpoints/
-logs/
+/data/
+/checkpoints/
+/logs/
 *.pt
 *.pth
 *.csv
