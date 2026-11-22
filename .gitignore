@@ -1,4 +1,4 @@
-﻿# Environnement virtuel
+# Environnement virtuel
 .venv/
 venv/
 
@@ -19,3 +19,7 @@ kaggle.json
 # Cache Python
 __pycache__/
 *.py[cod]
+
+# Caches des outils de test / lint
+.pytest_cache/
+.ruff_cache/

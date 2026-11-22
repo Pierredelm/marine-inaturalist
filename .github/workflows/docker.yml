@@ -1,0 +1,25 @@
+name: Docker build (optionnel)
+
+# Vérifie seulement que l'image se construit encore. Rien n'est publié.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - .github/workflows/docker.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construire l'image
+        run: docker build -t marine-baseline .
+      - name: Vérifier que le point d'entrée d'entraînement démarre
+        run: docker run --rm marine-baseline python -m scripts.02_train --help

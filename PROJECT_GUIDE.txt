@@ -123,4 +123,71 @@ afin que Python résolve les imports `src.*` de manière identique sur tous les 
     * Évaluation validation et prédiction test :
         python -m scripts.03_evaluate --mode val --data-root <dossier_donnees>
         python -m scripts.03_evaluate --mode test --data-root <dossier_donnees> --test-dir <dossier_test>
+
+
+6. TESTS, LINT ET INTÉGRATION CONTINUE (tests/, .github/workflows/, pyproject.toml)
+--------------------------------------------------------------------------------
+[Installation développeur]
+  python -m venv .venv && source .venv/bin/activate
+  pip install torch torchvision
+  pip install -e ".[dev]"        (dépendances du projet + pytest + ruff)
+
+[tests/]
+  - conftest.py          : génère un mini-jeu de données factice (3 espèces, 18 images
+                           JPEG minuscules, manifestes train/val) dans un dossier temporaire.
+  - test_metrics.py      : Top-1 / Macro-F1 vérifiés sur un cas calculé à la main.
+  - test_models.py       : registre, formes de sortie (RNN/GRU/LSTM, ConvNeXt), erreurs.
+  - test_config.py       : chaque YAML se charge, désigne un modèle enregistré ;
+                           --data-root et MARINE_DATA_ROOT relocalisent tous les chemins.
+  - test_dataset.py      : lecture disque et lecture via dataset.bin donnent les mêmes pixels.
+  - test_smoke_train.py  : 1 epoch complète sur CPU pour default.yaml et beefy_cnn.yaml
+                           (--batch-size 4 car drop_last=True : un lot trop grand donnerait
+                           zéro itération). Marqué "slow".
+  Commandes : pytest | pytest -m "not slow" | ruff check .
+
+[Limites volontaires]
+  - Les runners GitHub n'ont pas de GPU : DDP/NCCL, AMP et CudaPrefetcher ne sont PAS testés
+    par la CI. Ils se valident à la main sur le cluster.
+  - ruff est configuré avec un jeu de règles minimal (E9 + F : erreurs de syntaxe, noms
+    indéfinis, imports inutilisés) pour ne pas imposer de reformatage du code existant.
+
+[.github/workflows/ci.yml]
+  - Déclenché sur push vers main, sur toute Pull Request, et manuellement.
+  - Job "lint" : ruff check.
+  - Job "test" : Python 3.10 et 3.12, PyTorch CPU installé avant le projet (évite les Go de
+    bibliothèques CUDA), puis pip install -e ".[dev]" et pytest.
+  - Activation : le fichier doit être dans .github/workflows/ à la racine du dépôt ; il suffit
+    de pousser sur GitHub, puis d'ouvrir l'onglet Actions. Pour rendre la CI obligatoire :
+    Settings > Branches > règle de protection sur main > "Require status checks to pass".
+
+[pyproject.toml]
+  - [build-system] + [tool.setuptools.packages.find] : rendent `pip install -e .` possible
+    (sans cela, setuptools refuse la structure plate src/ + scripts/ + configs/).
+  - [project.optional-dependencies] dev : pytest, ruff.
+  - [tool.pytest.ini_options] : testpaths, pythonpath (racine du dépôt), marqueur "slow".
+  - [tool.ruff] : voir ci-dessus.
+  - Remarque : "kaggle" et "six" figurent dans les dépendances mais aucun fichier Python
+    du dépôt ne les importe actuellement.
+
+
+7. DOCKER (Dockerfile, .dockerignore, .github/workflows/docker.yml) — OPTIONNEL
+--------------------------------------------------------------------------------
+  - Preuve de concept : le projet PEUT être conteneurisé, mais le workflow .venv reste la
+    méthode de référence.
+  - L'image (base pytorch/pytorch CUDA 12.4) ne contient que le code et les dépendances lues
+    dans pyproject.toml. Données, checkpoints et logs sont dans un volume monté sur /data
+    (MARINE_DATA_ROOT=/data).
+  - Commandes :
+      docker build -t marine-baseline .
+      docker run --rm marine-baseline
+      docker run --rm --gpus all --ipc=host -v <donnees>:/data marine-baseline \
+          python -m scripts.02_train --config configs/default.yaml
+      docker run --rm --gpus all --ipc=host -v <donnees>:/data marine-baseline \
+          torchrun --nproc_per_node=4 -m scripts.02_train --config configs/beefy_cnn.yaml
+  - --ipc=host (ou --shm-size) est indispensable avec num_workers > 0.
+  - docker.yml : construit l'image et lance "--help" ; déclenché uniquement si Dockerfile,
+    .dockerignore ou pyproject.toml changent dans une Pull Request, ou à la demande.
+    Aucune publication sur un registre.
+  - Non couvert : Apptainer/Singularity, publication d'image, clusters HPC.
+
 ================================================================================
