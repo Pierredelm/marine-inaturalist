@@ -8,6 +8,21 @@ Toujours exécuter les scripts depuis la racine du dépôt avec `python -m scrip
 
 ---
 
+## 0. INSTALLATION
+
+```bash
+python -m venv .venv
+source .venv/bin/activate            # Windows : .venv\Scripts\activate
+
+# PyTorch d'abord (choisir la variante CUDA/CPU adaptée sur pytorch.org), puis le projet
+pip install torch torchvision
+pip install -e ".[dev]"              # dépendances du projet + pytest + ruff
+```
+
+`pip install -e .` seul installe uniquement les dépendances d'exécution ; l'extra `[dev]` ajoute les outils de test et de lint.
+
+---
+
 ## 1. VUE D'ENSEMBLE DES GRANDS DOSSIERS
 
 * **`configs/`** : contient les fichiers de configuration au format YAML (`default.yaml` pour l'architecture hybride `cnn_rnn`, `beefy_cnn.yaml` pour l'architecture `convolutional_resnet` de type ConvNeXt).
@@ -15,6 +30,9 @@ Toujours exécuter les scripts depuis la racine du dépôt avec `python -m scrip
 * **`src/data/`** : gère l'accès au disque ou à l'archive binaire `dataset.bin`, le décodage JPEG rapide (`draft`), le redimensionnement complet (*warp* `224x224`) et l'assemblage des lots (*batchs*).
 * **`src/models/`** : contient la définition des architectures de réseaux de neurones entraînées depuis zéro et un registre dynamique permettant de sélectionner un modèle depuis le YAML.
 * **`src/training/`** : encapsule la mécanique d'apprentissage (boucle d'optimisation AdamW, précision mixte AMP, planificateur cosinus avec *warmup*, synchronisation DDP et calcul des métriques).
+* **`tests/`** : tests `pytest` (métriques, registre de modèles, configuration, lecture disque vs `dataset.bin`, entraînement de bout en bout sur CPU avec un mini-jeu de données factice).
+* **`.github/workflows/`** : intégration continue GitHub Actions (`ci.yml` : lint + tests ; `docker.yml` : vérification optionnelle de la construction de l'image).
+* **`Dockerfile`** : image optionnelle (preuve de concept) pour lancer le projet dans un conteneur.
 * **`src/utils/`** : regroupe les outils transverses d'infrastructure (détection matérielle CUDA/MPS/DDP/CPU, sauvegarde atomique des checkpoints, lecture de configuration et journalisation).
 
 ---
@@ -94,3 +112,75 @@ torchrun --nproc_per_node=4 -m scripts.02_train --config configs/beefy_cnn.yaml 
 python -m scripts.03_evaluate --mode val --data-root /chemin/vers/marine-inaturalist
 python -m scripts.03_evaluate --mode test --data-root /chemin/vers/marine-inaturalist --test-dir /chemin/vers/test
 ```
+
+---
+
+## 4. TESTS ET INTÉGRATION CONTINUE (CI)
+
+### Lancer les tests en local
+
+```bash
+pytest                       # tout (≈ 1 à 3 min sur CPU, dont 2 entraînements d'une epoch)
+pytest -m "not slow"         # uniquement les tests rapides (sans entraînement de bout en bout)
+ruff check .                 # lint (erreurs de syntaxe et pyflakes : noms indéfinis, imports inutilisés)
+```
+
+| Fichier de test | Ce qu'il vérifie |
+| --- | --- |
+| `tests/test_metrics.py` | Top-1 et Macro-F1 sur un cas calculé à la main, tracker vide, `reset()` |
+| `tests/test_models.py` | Les deux architectures sont enregistrées, forme `(B, num_classes)` des sorties (RNN/GRU/LSTM), erreurs sur nom de modèle ou type de RNN inconnu |
+| `tests/test_config.py` | Chaque YAML de `configs/` se charge et désigne un modèle existant ; `--data-root` et `MARINE_DATA_ROOT` relocalisent tous les chemins |
+| `tests/test_dataset.py` | Forme des échantillons ; les lectures via `dataset.bin` donnent exactement les mêmes pixels que les lectures disque |
+| `tests/test_smoke_train.py` | Une epoch complète sur CPU pour `default.yaml` et `beefy_cnn.yaml` : checkpoint `*_last.pt` et `metrics.csv` créés, pas de `crash.log` |
+
+Le jeu de données factice (3 espèces, 18 images 64x48) est généré à la volée dans un dossier temporaire par `tests/conftest.py` : aucun téléchargement, aucune donnée réelle.
+
+### Ce que la CI ne couvre pas
+
+Les runners GitHub n'ont pas de GPU : la CI ne teste donc ni DDP/NCCL, ni l'AMP, ni `channels_last`/`CudaPrefetcher` sur CUDA. Ces chemins se valident à la main sur le cluster (`torchrun ...`).
+
+### Activer la CI sur GitHub
+
+1. Les fichiers sont déjà au bon endroit : `.github/workflows/ci.yml` à la **racine du dépôt** (le dossier `.github/workflows/` est obligatoire, GitHub ignore tout autre emplacement).
+2. Faire un `git add .github tests pyproject.toml && git commit && git push` sur la branche `main` (ou ouvrir une Pull Request).
+3. Ouvrir l'onglet **Actions** du dépôt : le workflow *CI* apparaît et s'exécute à chaque push sur `main` et à chaque Pull Request. Si GitHub affiche un bouton « I understand my workflows, go ahead and enable them » (fréquent sur un fork), le cliquer.
+4. Lancement manuel : Actions → *CI* → **Run workflow**.
+5. (Recommandé) Rendre la CI obligatoire : **Settings → Branches → Add branch protection rule** sur `main` → cocher *Require status checks to pass before merging* → sélectionner `Lint (ruff)` et `Tests (Python 3.10)` / `Tests (Python 3.12)` (ces noms n'apparaissent dans la liste qu'après une première exécution).
+6. (Optionnel) Badge à coller en haut du README (remplacer `<utilisateur>/<depot>`) :
+   `![CI](https://github.com/<utilisateur>/<depot>/actions/workflows/ci.yml/badge.svg)`
+
+Le workflow installe PyTorch en version CPU (`--index-url https://download.pytorch.org/whl/cpu`) avant le projet, ce qui évite de télécharger plusieurs Go de bibliothèques CUDA inutiles.
+
+---
+
+## 5. DOCKER (OPTIONNEL, PREUVE DE CONCEPT)
+
+Le projet peut être lancé dans un conteneur, mais ce n'est **pas** nécessaire : le workflow `.venv` + `pyproject.toml` reste la méthode de référence. Principes :
+
+* l'image ne contient **que le code et les dépendances** ; données, checkpoints et logs vivent dans un volume monté sur `/data` (la variable `MARINE_DATA_ROOT=/data` relocalise tous les chemins, comme `--data-root`) ;
+* les dépendances sont lues dans `pyproject.toml` (une seule liste à maintenir) ; `torch`/`torchvision` viennent de l'image de base `pytorch/pytorch`.
+
+```bash
+# Construire l'image (depuis la racine du dépôt)
+docker build -t marine-baseline .
+
+# Vérifier que ça démarre
+docker run --rm marine-baseline
+
+# Entraîner sur un GPU (nécessite le NVIDIA Container Toolkit)
+docker run --rm --gpus all --ipc=host -v /chemin/vers/marine-inaturalist:/data \
+  marine-baseline python -m scripts.02_train --config configs/default.yaml
+
+# Plusieurs GPU sur une même machine
+docker run --rm --gpus all --ipc=host -v /chemin/vers/marine-inaturalist:/data \
+  marine-baseline torchrun --nproc_per_node=4 -m scripts.02_train --config configs/beefy_cnn.yaml
+
+# Éviter des fichiers appartenant à root dans le volume (Linux)
+docker run --rm --gpus all --ipc=host --user $(id -u):$(id -g) -v ... marine-baseline ...
+```
+
+`--ipc=host` (ou `--shm-size=8g`) est nécessaire dès que `num_workers > 0` : la mémoire partagée par défaut de Docker (64 Mo) fait planter les workers du `DataLoader`.
+
+Une vérification optionnelle de la construction de l'image existe dans `.github/workflows/docker.yml` : elle se déclenche uniquement quand le `Dockerfile`, `.dockerignore` ou `pyproject.toml` change dans une Pull Request, ou à la demande (Actions → *Docker build* → **Run workflow**). Rien n'est publié sur un registre.
+
+Remarque : la plupart des clusters HPC interdisent Docker. Si un jour l'image est utile là-bas, Apptainer peut la convertir (`apptainer pull marine.sif docker://...`), mais ce n'est pas couvert ici.

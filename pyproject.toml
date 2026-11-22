@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "marine-inaturalist"
 version = "0.2.0"
@@ -15,3 +19,28 @@ dependencies = [
     "kaggle",
     "six",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "slow: tests d'entraînement de bout en bout (quelques dizaines de secondes sur CPU)",
+]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["__pycache__"]
+
+[tool.ruff.lint]
+# Règles volontairement minimales : erreurs de syntaxe (E9) et pyflakes (F : noms indéfinis, imports inutilisés...)
+select = ["E9", "F"]

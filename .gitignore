@@ -1,11 +1,11 @@
-﻿# Environnement virtuel
+# Environnement virtuel
 .venv/
 venv/
 
 # Données lourdes, poids des modèles et logs
-data/
-checkpoints/
-logs/
+/data/
+/checkpoints/
+/logs/
 *.pt
 *.pth
 *.csv
@@ -19,3 +19,7 @@ kaggle.json
 # Cache Python
 __pycache__/
 *.py[cod]
+
+# Caches des outils de test / lint
+.pytest_cache/
+.ruff_cache/
