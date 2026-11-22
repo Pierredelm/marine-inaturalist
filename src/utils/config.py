@@ -1,24 +1,28 @@
-﻿import os
+"""Chargement des fichiers de configuration YAML et surcharge des répertoires de données."""
+
+from __future__ import annotations
+
+import os
 from pathlib import Path
+from typing import Any
+
 import yaml
 
-#on fait juste ça pour l"éventualité où on ne part pas sur le yaml habituel
-# permet d'intercepter la config et de changer un détail sans réécrire le yaml
 
 def load_config(
     config_path: str | Path = "configs/default.yaml",
     data_root_override: str | Path | None = None,
-) -> dict:
-    """Load YAML config and apply MARINE_DATA_ROOT or explicit path overrides."""
+) -> dict[str, Any]:
+    """Charge la configuration YAML et applique MARINE_DATA_ROOT ou --data-root le cas échéant."""
     path = Path(config_path)
     if not path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {path.resolve()}")
+        raise FileNotFoundError(f"Fichier de configuration introuvable : {path.resolve()}")
 
     with open(path, mode="r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config: dict[str, Any] = yaml.safe_load(f) or {}
 
     root_override = data_root_override or os.environ.get("MARINE_DATA_ROOT")
-    if root_override:  #décider de réécrire les options alors allons chercher
+    if root_override:
         root = Path(root_override)
         paths = config.setdefault("paths", {})
         paths["data_root"] = str(root)

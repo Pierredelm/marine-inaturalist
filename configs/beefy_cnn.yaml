@@ -1,4 +1,4 @@
-﻿# Central configuration for marine-inaturalist
+# Configuration centrale pour l'architecture ConvNeXt (convolutional_resnet)
 
 paths:
   data_root: "C:/Users/pdelm/datasets/marine-inaturalist"
@@ -10,14 +10,14 @@ paths:
 
 data:
   seed: 42
-  sample_fraction: 0.22    # ~22 Go (~1.35M images à ~16 Ko/img)
+  sample_fraction: 0.22    # ~22 Go (~1,35 M d'images à ~16 Ko/image)
   val_ratio: 0.20
-  image_size: 224
-  decode_min_side: 256   # JPEG draft decode target; keep >= image_size * 256/224
+  image_size: 224          # Dimension cible (224x224) obtenue par redimensionnement complet (warp)
+  decode_min_side: 224     # Cible de décodage rapide JPEG (draft) ; conserver >= image_size
   num_classes: 2185
 
 download:
-  max_workers: 32          # augmenté de 16 -> 32 pour absorber la latence HTTPS sur ~1.2M nouvelles vignettes
+  max_workers: 32          # Nombre de threads parallèles pour absorber la latence HTTPS
   timeout_sec: 10
 
 model:
@@ -29,10 +29,13 @@ model:
 train:
   epochs: 20
   batch_size: 256
+  num_workers: 6
+  prefetch_factor: 2
+  channels_last: true
   lr: 1.5e-3
   warmup_epochs: 2.0
+  min_lr_ratio: 0.01
   weight_decay: 0.05
   label_smoothing: 0.1
   max_grad_norm: 1.0
   use_amp: true
-  channels_last: true

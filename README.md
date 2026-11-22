@@ -1,239 +1,96 @@
-ARCHITECTURE DU PROJET : CLASSIFICATION D'ESPECES MARINES
+# ARCHITECTURE DU PROJET : CLASSIFICATION D'ESPÈCES MARINES (MARINE-INATURALIST)
 
+1. **Configuration (`configs/`)** : isole tous les paramètres d'expérience (chemins, hyperparamètres, choix de l'architecture) du code source Python.
+2. **Bibliothèque interne (`src/`)** : regroupe les composants réutilisables, découpés par domaine fonctionnel (`data`, `models`, `training`, `utils`).
+3. **Points d'entrée (`scripts/`)** : orchestrent l'exécution complète des différentes phases du pipeline (audit des clés, téléchargement, compactage optionnel, entraînement, évaluation).
 
+Toujours exécuter les scripts depuis la racine du dépôt avec `python -m scripts.<nom>` afin de résoudre proprement les imports `src.*` sur Windows, macOS et Linux.
 
-1. La configuration (configs/) isole tous les paramètres d'expérience (chemins, hyperparamètres, choix de l'architecture) du code source.
+---
 
-2. La bibliothèque interne (src/) regroupe les composants réutilisables, découpés par domaine fonctionnel (données, modèles, entraînement, utilitaires).
+## 1. VUE D'ENSEMBLE DES GRANDS DOSSIERS
 
-3. Les points d'entrée (scripts/) orchestrent l'exécution complète des différentes phases du pipeline (préparation, entraînement, évaluation).
+* **`configs/`** : contient les fichiers de configuration au format YAML (`default.yaml` pour l'architecture hybride `cnn_rnn`, `beefy_cnn.yaml` pour l'architecture `convolutional_resnet` de type ConvNeXt).
+* **`scripts/`** : contient les scripts exécutables en ligne de commande (`python -m scripts.<nom>`). Chaque script correspond à une étape autonome du cycle de vie du projet.
+* **`src/data/`** : gère l'accès au disque ou à l'archive binaire `dataset.bin`, le décodage JPEG rapide (`draft`), le redimensionnement complet (*warp* `224x224`) et l'assemblage des lots (*batchs*).
+* **`src/models/`** : contient la définition des architectures de réseaux de neurones entraînées depuis zéro et un registre dynamique permettant de sélectionner un modèle depuis le YAML.
+* **`src/training/`** : encapsule la mécanique d'apprentissage (boucle d'optimisation AdamW, précision mixte AMP, planificateur cosinus avec *warmup*, synchronisation DDP et calcul des métriques).
+* **`src/utils/`** : regroupe les outils transverses d'infrastructure (détection matérielle CUDA/MPS/DDP/CPU, sauvegarde atomique des checkpoints, lecture de configuration et journalisation).
 
+---
 
+## 2. DÉTAIL DES MODULES, CLASSES ET FONCTIONS
 
-1. VUE D'ENSEMBLE DES GRANDS DOSSIERS
+### A. Configuration : `configs/`
 
+* **`configs/default.yaml`** & **`configs/beefy_cnn.yaml`** :
+  * `paths` : répertoires des données brutes, des manifestes (`train.csv`, `val.csv`, `class_to_idx.json`), des sauvegardes (`checkpoints`) et des journaux (`logs`).
+  * `data` : nombre de classes (`2185` espèces), dimension cible des images (`image_size: 224`), cible de décodage JPEG (`decode_min_side: 224`) et graine aléatoire (`seed`).
+  * `model` : nom de l'architecture enregistrée (`model.name`) et hyperparamètres structurels propres au réseau.
+  * `train` : nombre d'epochs, taille de lot (`batch_size`), taux d'apprentissage (`lr`), *warmup*, régularisation (`weight_decay`), précision mixte (`use_amp`) et format mémoire (`channels_last`).
 
+### B. Points d'entrée : `scripts/`
 
-configs/
+* **`scripts/00_inspecter_cles.py`** : audite le fichier `train_keys.txt` (nombre total d'images, répartition des espèces, extensions) et vérifie le téléchargement d'un échantillon depuis AWS S3.
+* **`scripts/01_telecharger_et_couper.py`** : télécharge un échantillon stratifié en parallèle (`ThreadPoolExecutor`), convertit proprement toutes les images en JPEG RGB et génère `train.csv`, `val.csv` et `class_to_idx.json` sans fuite de données lors des ajouts incrémentaux.
+* **`scripts/01b_pack_shard.py`** : compacte optionnellement les fichiers JPEG dans un fichier binaire contigu (`dataset.bin`) et met à jour les décalages (`byte_offset`, `byte_length`) dans les manifestes CSV afin d'éliminer la latence d'ouverture de millions de petits fichiers sur cluster.
+* **`scripts/02_train.py`** :
+  * `seed_everything(seed)` : fixe l'état des générateurs aléatoires (Python, NumPy, PyTorch CPU/CUDA) et active cuDNN benchmark ainsi que les Tensor Cores TF32 sur GPU NVIDIA RTX.
+  * `CudaPrefetcher` : précharge de manière asynchrone le lot suivant en VRAM sur un flux CUDA secondaire pendant que le GPU calcule le lot courant.
+  * `ExperimentRunner` : charge la configuration YAML, applique les surcharges CLI (`--data-root`, `--epochs`, `--batch-size`, `--num-workers`, `--resume`), instancie le modèle via `build_model` et lance `MarineTrainer.fit`.
+* **`scripts/03_evaluate.py`** :
+  * `UnlabeledImageDataset` : parcourt récursivement un répertoire d'images sans étiquettes pour l'inférence finale.
+  * `ModelEvaluator.evaluate_validation()` : recharge un checkpoint, évalue le modèle sur `val.csv` (Top-1, Top-5, Macro-F1) et génère `logs/val_per_class_report.csv`.
+  * `ModelEvaluator.predict_test()` : produit le fichier `submission.csv` sur le jeu de test.
 
-  Contient les fichiers de configuration au format YAML (notamment default.yaml). C'est le point de contrôle central qui définit les hyperparamètres, les chemins d'accès aux données et l'architecture du modèle à instancier. i.e. si vous voulez modifier un paramètre dans l'execution du système (pas forcément du modèle), c'est ici.
+### C. Données et prétraitement : `src/data/`
 
+* **`src/data/transforms.py`** :
+  * `TransformConfig` : dataclass extrayant `image_size` (`224`) depuis le YAML.
+  * `MarineTransformBuilder` : construit les pipelines `build_train()` et `build_val()` autour d'un **redimensionnement complet (*warp*) `A.Resize(224, 224)`**. Ce choix évite de couper les extrémités morphologiques (nageoires, queues, tentacules, corps allongés) comme le ferait un recadrage (*crop*).
+* **`src/data/dataset.py`** :
+  * `SampleRecord` : enregistrement immuable et compact (`@dataclass(frozen=True, slots=True)`).
+  * `MarineSpeciesDataset` : lit les manifestes CSV de manière portable entre Windows, macOS et Linux, exploite le mode `Image.draft()` de `libjpeg` et bascule automatiquement sur `dataset.bin` s'il est présent.
+  * `create_dataloaders()` : instancie les `DataLoader` avec `DistributedSampler` automatique en environnement DDP multi-GPU.
 
+### D. Architectures de réseaux : `src/models/`
 
-scripts/
+* **`src/models/__init__.py`** : définit `BaseVisionClassifier`, le décorateur `@register_model`, la fabrique `build_model(cfg)` et la découverte automatique des modules `_auto_discover_models()`.
+* **`src/models/cnn_rnn.py`** (`model.name: "cnn_rnn"`) : encodeur convolutif à 5 étages (`224 -> 112 -> 56 -> 28 -> 14 -> 7`) suivi d'une normalisation `LayerNorm`, d'un réseau récurrent bidirectionnel (RNN, GRU ou LSTM) parcourant les 49 jetons spatiaux et d'une moyenne globale.
+* **`src/models/beefy_cnn.py`** (`model.name: "convolutional_resnet"`) : architecture purement convolutive inspirée de ConvNeXt (stem `4x4`, convolutions séparables en profondeur `7x7`, `LayerNorm2d`, `GELU` et modulation résiduelle `LayerScale`).
 
-  Contient les scripts exécutables en ligne de commande (python -m scripts.<nom>). Chaque script correspond à une étape autonome du cycle de vie du projet : constitution du jeu de données, entraînement du modèle, puis évaluation.
+### E. Entraînement et utilitaires : `src/training/` & `src/utils/`
 
+* **`src/training/trainer.py`** (`MarineTrainer`) : gère AdamW avec exclusion du `weight_decay` sur les paramètres 1D, montée linéaire (*warmup*) puis décroissance en cosinus par batch, précision mixte AMP, écrêtage de gradients (`clip_grad_norm_`) et synchronisation distribuée des métriques de validation.
+* **`src/training/metrics.py`** (`ClassificationMetricTracker`) : calcule l'exactitude Top-1 et le score Macro-F1 via `torch.bincount` avec réduction globale `all_reduce` en mode DDP.
+* **`src/utils/device.py`** : sélectionne automatiquement `DDP (Cluster Linux) -> CUDA (NVIDIA RTX) -> MPS (Apple Silicon) -> CPU`.
+* **`src/utils/checkpoint.py`** : sauvegarde atomiquement `<modele>_last.pt` et `<modele>_best.pt` via fichiers temporaires et `os.replace()`.
+* **`src/utils/logger.py`** & **`src/utils/visualize.py`** : journalisent chaque epoch dans `logs/metrics.csv` et tracent les courbes dans `logs/training_curves.png`.
 
+---
 
-src/data/
+## 3. COMMANDES D'EXÉCUTION RAPIDE (WINDOWS, MACOS, CLUSTER LINUX)
 
-  Gère l'accès au disque, le prétraitement des images, l'augmentation de données et l'assemblage des lots (batchs) destinés au processeur graphique (GPU).
+```bash
+# 1. Inspecter train_keys.txt et tester l'accès S3
+python -m scripts.00_inspecter_cles --data-root /chemin/vers/marine-inaturalist
 
+# 2. Télécharger l'échantillon stratifié et créer train.csv / val.csv
+python -m scripts.01_telecharger_et_couper --data-root /chemin/vers/marine-inaturalist
 
+# 3. (Optionnel) Compacter les JPEG dans dataset.bin pour accélérer les I/O
+python -m scripts.01b_pack_shard --data-root /chemin/vers/marine-inaturalist
 
-src/models/
+# 4. Entraîner en mono-GPU (Windows RTX / Linux) ou Apple Silicon (macOS MPS)
+python -m scripts.02_train --config configs/default.yaml --data-root /chemin/vers/marine-inaturalist
 
-  Contient la définition des architectures de réseaux de neurones, et un registre permettant de sélectionner dynamiquement un modèle depuis la configuration YAML.
+# 5. Reprendre un entraînement interrompu
+python -m scripts.02_train --config configs/default.yaml --data-root /chemin/vers/marine-inaturalist --resume /chemin/vers/checkpoints/cnn_rnn_last.pt
 
+# 6. Entraîner en distribué sur un cluster Linux multi-GPU (ex. 4 GPU NVIDIA RTX)
+torchrun --nproc_per_node=4 -m scripts.02_train --config configs/beefy_cnn.yaml --data-root /scratch/marine-inaturalist
 
-
-src/training/
-
-  Encapsule la mécanique d'apprentissage : boucle d'optimisation, calcul de la fonction de perte, planification du taux d'apprentissage et calcul des métriques.
-
-
-
-src/utils/
-
-  Regroupe les outils transverses d'infrastructure : gestion du matériel (CPU/GPU), sauvegarde et reprise des états d'entraînement, lecture des configurations et journalisation des résultats.
-
-
-
-
-
-2. DETAIL DES MODULES, CLASSES ET FONCTIONS
-
-
-
-A. Configuration : configs/
-
-
-
-configs/default.yaml
-
-  Regroupe l'ensemble des paramètres sous quatre sections principales :
-
-  - paths : répertoires des données brutes, des manifestes (index CSV/JSON), des sauvegardes de modèles (checkpoints) et des journaux (logs).
-
-  - data : nombre de classes (2 185 espèces), taille cible des images, graine aléatoire (seed) et paramètres de chargement parallèle.
-
-  - model : nom de l'architecture enregistrée (model.name) et hyperparamètres structurels propres au réseau (dimensions, couches, dropout).
-
-  - train : nombre d'epochs, taux d'apprentissage (lr), régularisation (weight_decay), précision mixte (use_amp) et format mémoire (channels_last).
-
-
-
-
-
-B. Points d'entrée : scripts/
-
-
-
-scripts/01_telecharger_et_couper.py et scripts/01b_pack_shard.py
-
-  Assurent l'acquisition des images, la séparation stratifiée entre jeu d'entraînement (train.csv) et jeu de validation (val.csv), ainsi que le compactage des images dans un fichier binaire contigu (dataset.bin) # optionel. Ce compactage évite la latence liée à l'ouverture individuelle de millions de petits fichiers JPEG sur le système de fichiers.
-
-
-
-scripts/02_train.py
-
-  Point d'entrée principal pour l'entraînement d'un modèle :
-
-  - seed_everything(seed) : fixe l'état de tous les générateurs aléatoires (Python, NumPy, PyTorch CPU et CUDA) pour garantir la reproductibilité et active les optimisations matérielles cuDNN et TF32.
-
-  - CudaPrefetcher : encapsule le DataLoader pour transférer de manière asynchrone le batch suivant vers la mémoire vidéo (VRAM) sur un flux CUDA secondaire, pendant que le GPU exécute les calculs du batch courant.
-
-  - ExperimentRunner : charge la configuration YAML via load_config, applique les éventuelles surcharges passées en ligne de commande (batch_size, epochs, num_workers), instancie le modèle via build_model et lance MarineTrainer.fit.
-
-  - parse_args() : analyse les arguments du terminal (--config, --data-root, --epochs, --batch-size, --num-workers, --resume).
-
-
-
-scripts/03_evaluate.py
-
-  Point d'entrée dédié à l'évaluation hors ligne et à l'inférence :
-
-  - UnlabeledImageDataset : charge un répertoire d'images sans étiquettes pour la phase de prédiction finale.
-
-  - ModelEvaluator.evaluate_validation() : recharge un checkpoint sauvegardé, évalue le modèle sur l'ensemble de validation et calcule l'exactitude Top-1, l'exactitude Top-5 et le score Macro-F1. Génère également un rapport détaillé par espèce (val_per_class_report.csv) indiquant les confusions les plus fréquentes.
-
-  - ModelEvaluator.predict_test() : produit les prédictions sur des images de test non étiquetées et exporte le fichier submission.csv.
-
-
-
-
-
-C. Données et prétraitement : src/data/
-
-
-
-src/data/transforms.py
-
-  - TransformConfig : dataclass extrayant les paramètres de prétraitement depuis le YAML.
-
-  - MarineTransformBuilder : construit deux chaînes de transformations distinctes via build_train() (redimensionnement, recadrage, augmentations aléatoires géométriques et colorimétriques pour limiter le surapprentissage, puis normalisation) et build_val() (redimensionnement déterministe et normalisation uniquement, afin d'évaluer le modèle dans des conditions stables).
-
-
-
-src/data/dataset.py
-
-  - LoaderConfig : regroupe les paramètres d'exécution des DataLoaders (taille des batchs, nombre de processus CPU parallèles).
-
-  - MarineSpeciesDataset : lit les index CSV (train.csv ou val.csv) et extrait les images correspondantes avant de leur appliquer les transformations.
-
-  - create_dataloaders() : instancie les DataLoaders d'entraînement et de validation en gérant le parallélisme CPU (num_workers) et l'échantillonnage distribué le cas échéant.
-
-
-
-
-
-D. Architectures de réseaux : src/models/
-
-
-
-src/models/__init__.py
-
-  - BaseVisionClassifier : classe abstraite définissant l'interface obligatoire de tout modèle du projet (méthodes forward et init_weights, propriété num_trainable_params).
-
-  - register_model(name, config_cls) : décorateur associant un nom YAML à une classe de modèle et à sa dataclass de configuration.
-
-  - build_model(cfg) : fabrique (pattern Factory) qui instancie automatiquement l'architecture demandée par le fichier YAML ou par un checkpoint.
-
-  - _auto_discover_models() : importe automatiquement tous les modules présents dans src/models/ au démarrage afin d'enregistrer les architectures disponibles.
-
-
-
-src/models/cnn_rnn.py
-
-  - ModelConfig : dataclass typée contenant les paramètres de l'architecture hybride (canaux de base, type de cellule récurrente, taille cachée, nombre de couches, dropout).
-
-  - ConvStage : bloc élémentaire enchaînant des convolutions 2D, une normalisation par lot (BatchNorm2d), une activation ReLU et une réduction spatiale par MaxPool2d.
-
-  - CnnRnnClassifier : architecture hybride de référence. Un encodeur convolutif à cinq étages réduit l'image (224x224) en une grille spatiale de 7x7 vecteurs de caractéristiques. Ces 49 positions sont normalisées (LayerNorm) puis parcourues séquentiellement dans les deux sens par un réseau récurrent bidirectionnel (RNN, GRU ou LSTM). La moyenne globale des états de sortie alimente enfin une couche linéaire produisant les 2 185 scores de classes (logits). L'initialisation des poids combine Kaiming (CNN), Xavier et matrices orthogonales (RNN) pour stabiliser les gradients dès la première itération.
-
-
-
-
-
-E. Entraînement et métriques : src/training/
-
-
-
-src/training/trainer.py
-
-  - TrainConfig : dataclass centralisant les hyperparamètres d'optimisation (nombre d'epochs, taux d'apprentissage, durée du warmup, décroissance des poids, lissage des étiquettes, seuil de coupure des gradients).
-
-  - BaseTrainer : prépare le modèle sur le périphérique cible (GPU, multi-GPU ou CPU) et configure le format mémoire optimal (channels_last).
-
-  - MarineTrainer : pilote l'intégralité du processus d'apprentissage :
-
-    - _build_param_groups() : sépare les paramètres du réseau pour appliquer la régularisation (weight decay) uniquement aux matrices de poids 2D/4D, en excluant les biais et paramètres de normalisation 1D.
-
-    - _build_scheduler() : ajuste le taux d'apprentissage à chaque batch selon une montée linéaire initiale (warmup) suivie d'une décroissance en cosinus.
-
-    - _step_batch() : exécute la passe avant en précision mixte (autocast), ignore le batch si la perte devient non finie (NaN/Inf) afin de préserver les moments de l'optimiseur AdamW, rétro-propage le gradient, applique un écrêtage (clip_grad_norm_) et met à jour les poids.
-
-    - train_epoch() et validate() : exécutent respectivement un passage complet sur les données d'entraînement (avec mise à jour des poids) et sur les données de validation (sans calcul de gradient).
-
-    - fit() : coordonne la boucle sur l'ensemble des epochs, gère la reprise après interruption (resume_path), déclenche la sauvegarde des checkpoints et enregistre les métriques dans le journal CSV.
-
-
-
-src/training/metrics.py
-
-  - ClassificationMetricTracker : accumule les prédictions et les pertes sur l'ensemble des batchs d'une epoch afin de calculer l'exactitude globale et le score Macro-F1 (moyenne non pondérée des scores F1 de chaque espèce, accordant le même poids aux espèces rares et fréquentes).
-
-
-
-
-
-F. Utilitaires d'infrastructure : src/utils/
-
-
-
-src/utils/device.py
-
-  - setup_device(), wrap_model_for_device(), cleanup_device() : détectent automatiquement l'accélérateur matériel disponible (CUDA, MPS ou CPU), gèrent le contexte de précision mixte (GradScaler et autocast) et libèrent proprement les ressources en fin d'exécution.
-
-
-
-src/utils/checkpoint.py
-
-  - CheckpointManager : assure la persistance atomique de l'état d'entraînement (poids du modèle, état de l'optimiseur, état du scheduler, état du scaler AMP et états des générateurs aléatoires). Maintient deux fichiers par architecture : modele_last.pt (mis à jour à chaque epoch pour la reprise en cas d'arrêt) et modele_best.pt (mis à jour uniquement lorsque le score Macro-F1 de validation atteint un nouveau maximum).
-
-
-
-src/utils/config.py et src/utils/logger.py
-
-  - load_config() : lit le fichier YAML et résout les chemins de données.
-
-  - ExperimentLogger : écrit les métriques d'entraînement et de validation à chaque fin d'epoch dans un fichier CSV structuré et journalise toute exception critique.
-
-
-
-
-
-3. DEROULEMENT D'UNE ITERATION D'ENTRAINEMENT (FLUX DE DONNEES)
-
-
-
-1. Initialisation : 02_train.py charge configs/default.yaml, fixe les graines aléatoires et instancie les DataLoaders ainsi que le modèle déclaré sous model.name.
-
-2. Alimentation : Les workers CPU lisent les images, appliquent les augmentations (transforms.py) et forment des batchs que CudaPrefetcher précharge en VRAM.
-
-3. Passe avant (Forward) : MarineTrainer transmet le batch au modèle en format channels_last et précision mixte (FP16/BF16) pour obtenir 2 185 logits par image.
-
-4. Calcul d'erreur et rétro-propagation (Backward) : CrossEntropyLoss mesure l'écart avec les vraies étiquettes, les gradients sont calculés, écrêtés, puis appliqués par AdamW tandis que le scheduler met à jour le taux d'apprentissage.
-
-5. Validation et sauvegarde : En fin d'epoch, le modèle est évalué sans gradient sur val.csv ; les métriques sont consignées dans logs/ et les checkpoints sont mis à jour dans checkpoints/.
+# 7. Évaluer sur validation ou générer une soumission test
+python -m scripts.03_evaluate --mode val --data-root /chemin/vers/marine-inaturalist
+python -m scripts.03_evaluate --mode test --data-root /chemin/vers/marine-inaturalist --test-dir /chemin/vers/test
+```

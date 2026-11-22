@@ -1,11 +1,18 @@
-﻿import csv
+"""Journalisation structurée des métriques d'entraînement (metrics.csv) et des erreurs (crash.log)."""
+
+from __future__ import annotations
+
+import csv
 from datetime import datetime
 from pathlib import Path
 import traceback
+
 from src.training.metrics import EpochMetrics
 
 
 class ExperimentLogger:
+    """Enregistre les métriques par epoch au format CSV et capture les traces d'exceptions critiques."""
+
     HEADER = [
         "timestamp",
         "epoch",
@@ -19,16 +26,16 @@ class ExperimentLogger:
     ]
 
     def __init__(self, logs_dir: str | Path, enabled: bool = True) -> None:
-        self.logs_dir = Path(logs_dir)#où il vit
-        self.enabled = enabled# en marche?
-        self.csv_path = self.logs_dir / "metrics.csv" #le nom chemin csv des données
-        self.crash_path = self.logs_dir / "crash.log" # nom log
+        self.logs_dir = Path(logs_dir)
+        self.enabled = enabled
+        self.csv_path = self.logs_dir / "metrics.csv"
+        self.crash_path = self.logs_dir / "crash.log"
 
-        if self.enabled: # si existe
-            self.logs_dir.mkdir(parents=True, exist_ok=True) #crée le dir sans remplacer si existe déja et en créant les parents s'ils n'existent pas
+        if self.enabled:
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
             if not self.csv_path.exists():
                 with open(self.csv_path, mode="w", newline="", encoding="utf-8") as f:
-                    csv.writer(f).writerow(self.HEADER) # rajoute un évènement avec tout le payload (timestamp, f1, epochs... des noms)
+                    csv.writer(f).writerow(self.HEADER)
 
     def log_epoch(
         self,
@@ -38,6 +45,7 @@ class ExperimentLogger:
         train_m: EpochMetrics,
         val_m: EpochMetrics,
     ) -> None:
+        """Ajoute une ligne récapitulative des métriques de l'epoch dans metrics.csv."""
         if not self.enabled:
             return
         row = [
@@ -52,12 +60,13 @@ class ExperimentLogger:
             f"{val_m.macro_f1:.6f}",
         ]
         with open(self.csv_path, mode="a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(row) #envoyer cette fois ci la ligne avec le payload
+            csv.writer(f).writerow(row)
 
     def log_exception(self, exc: BaseException) -> None:
+        """Écrit la trace complète d'une exception non gérée dans crash.log."""
         if not self.enabled:
             return
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         with open(self.crash_path, mode="a", encoding="utf-8") as f:
-            f.write(f"\n--- CRASH @ {datetime.now().isoformat()} ---\n")
-            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))#exc.__traceback__ renvoie le module qui a merdé
+            f.write(f"\n--- ERREUR CRITIQUE @ {datetime.now().isoformat()} ---\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
