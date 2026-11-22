@@ -1,11 +1,13 @@
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from src.models import BaseVisionClassifier, register_model
+
 
 @dataclass(frozen=True)
 class ModelConfig:#dataclass avec des valeurs par défaut > en vrai celles du YAML
+    name: str = "cnn_rnn"
     num_classes: int = 2185   #pourrait être direct tiré depuis inspecter clés...
     in_channels: int = 3 #RGB
     base_channels: int = 32 #depth channel
@@ -21,6 +23,7 @@ class ModelConfig:#dataclass avec des valeurs par défaut > en vrai celles du YA
         data_cfg = cfg.get("data", {})
         model_cfg = cfg.get("model", {})
         return cls(
+            name=str(model_cfg.get("name", "cnn_rnn")).strip().lower(),
             num_classes=int(data_cfg.get("num_classes", 2185)),
             in_channels=int(model_cfg.get("in_channels", 3)),
             base_channels=int(model_cfg.get("base_channels", 32)),
@@ -31,24 +34,6 @@ class ModelConfig:#dataclass avec des valeurs par défaut > en vrai celles du YA
             bidirectional=bool(model_cfg.get("bidirectional", True)),
             dropout=float(model_cfg.get("dropout", 0.3)),
         )
-
-
-class BaseVisionClassifier(nn.Module, ABC):
-    def __init__(self, config: ModelConfig) -> None:
-        super().__init__()
-        self.config = config
-
-    @abstractmethod #récupé de module//final pass
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute raw class logits of shape (B, num_classes) from (B, C, H, W)."""
-
-    @abstractmethod #recupéré de module
-    def init_weights(self) -> None:
-        """Initialize network weights from scratch."""
-
-    @property
-    def num_trainable_params(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad) #numel = number of elements
 
 
 class ConvStage(nn.Module): #module de conv = conv2d + batch norm + relu
@@ -72,6 +57,7 @@ class ConvStage(nn.Module): #module de conv = conv2d + batch norm + relu
         return self.block(x) #littéralement faire passer l'input dans le séquential, ie la première, la seconde, and so on...
 
 
+@register_model("cnn_rnn", ModelConfig)
 class CnnRnnClassifier(BaseVisionClassifier):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__(config)

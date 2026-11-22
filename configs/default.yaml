@@ -21,6 +21,7 @@ download:
   timeout_sec: 10
 
 model:
+  name : "cnn_rnn"
   in_channels: 3
   base_channels: 32
   rnn_type: "rnn"          # "rnn" | "gru" | "lstm" (switch to "gru" if still unstable)
@@ -32,11 +33,11 @@ model:
 
 train:
   epochs: 20
-  batch_size: 64
-  num_workers: 4           # try 6-8 if GPU utilisation is low
+  batch_size: 128
+  num_workers: 6           # try 6-8 if GPU utilisation is low
   prefetch_factor: 2
   channels_last: true
-  lr: 0.001                # was 0.0015: too high for Adam from scratch
+  lr: 0.0014                # was 0.0015: too high for Adam from scratch
   warmup_epochs: 1.0       # linear warmup, then cosine (stepped per batch)
   min_lr_ratio: 0.01       # cosine floor = lr * min_lr_ratio
   weight_decay: 0.05       # applied to weights only (not BN/LayerNorm/bias)

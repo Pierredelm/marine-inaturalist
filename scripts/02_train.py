@@ -1,4 +1,7 @@
-﻿import argparse
+﻿import os
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1") # Évite le check réseau PyPI au spawn des workers
+
+import argparse
 from dataclasses import replace
 from pathlib import Path
 import random
@@ -7,7 +10,7 @@ import torch
 
 from src.data.dataset import LoaderConfig, create_dataloaders
 from src.data.transforms import MarineTransformBuilder, TransformConfig
-from src.models.cnn_rnn import CnnRnnClassifier, ModelConfig
+from src.models import build_model, get_model_name
 from src.training.trainer import MarineTrainer, TrainConfig
 from src.utils.config import load_config
 from src.utils.device import cleanup_device, setup_device
@@ -20,6 +23,65 @@ def seed_everything(seed: int) -> None: #définir tout les random state (python/
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high") # Active les Tensor Cores TF32 (RTX 4060 & cluster Linux)
+
+
+class CudaPrefetcher: # NEW > l'idée c'est de queuer les batchs en B2B sur des streams CUDA.
+    """Précharge le batch suivant en VRAM sur un stream CUDA secondaire pendant le calcul GPU."""
+
+    def __init__(self, loader, device: torch.device, channels_last: bool = True) -> None:
+        self.loader = loader
+        self.device = device
+        self.channels_last = channels_last and device.type == "cuda"
+        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    def __getattr__(self, name: str):
+        # Délègue .dataset, .sampler (DDP set_epoch), .batch_size, etc. au DataLoader sous-jacent
+        return getattr(self.loader, name)
+
+    def _to_gpu(self, batch):
+        images, labels = batch
+        if self.channels_last:
+            images = images.to(self.device, memory_format=torch.channels_last, non_blocking=True)
+        else:
+            images = images.to(self.device, non_blocking=True)
+        labels = labels.to(self.device, non_blocking=True)
+        return images, labels
+
+    def __iter__(self):
+        if self.stream is None:
+            yield from self.loader
+            return
+
+        loader_iter = iter(self.loader)
+        try:
+            next_batch = next(loader_iter)
+        except StopIteration:
+            return
+
+        with torch.cuda.stream(self.stream):
+            next_images, next_labels = self._to_gpu(next_batch)
+
+        while True:
+            current_stream = torch.cuda.current_stream(self.device)
+            current_stream.wait_stream(self.stream)
+            images, labels = next_images, next_labels
+            images.record_stream(current_stream)
+            labels.record_stream(current_stream)
+
+            try:
+                raw_next = next(loader_iter)
+            except StopIteration:
+                yield images, labels
+                break
+
+            with torch.cuda.stream(self.stream):
+                next_images, next_labels = self._to_gpu(raw_next)
+
+            yield images, labels
 
 
 class ExperimentRunner:
@@ -35,8 +97,6 @@ class ExperimentRunner:
         if args.num_workers is not None:
             loader_cfg = replace(loader_cfg, num_workers=args.num_workers)
         self.loader_cfg = loader_cfg
-
-        self.model_cfg = ModelConfig.from_dict(self.raw_cfg)
 
         train_cfg = TrainConfig.from_dict(self.raw_cfg)
         if args.epochs is not None:
@@ -56,8 +116,11 @@ class ExperimentRunner:
                 loader_cfg=self.loader_cfg,
                 is_distributed=ctx.is_distributed,
             )
+            if ctx.device.type == "cuda":
+                train_loader = CudaPrefetcher(train_loader, ctx.device, self.train_cfg.channels_last)
+                val_loader = CudaPrefetcher(val_loader, ctx.device, self.train_cfg.channels_last)
 
-            model = CnnRnnClassifier(self.model_cfg)# définir tourner le modèle (agnostique)
+            model = build_model(self.raw_cfg) # instancie automatiquement le modèle déclaré dans le YAML
             trainer = MarineTrainer(
                 model=model,
                 config=self.train_cfg,
@@ -66,8 +129,8 @@ class ExperimentRunner:
 
             if ctx.is_main_process:
                 print(f"Device          : {ctx.device} (DDP={ctx.is_distributed}, world_size={ctx.world_size})")
+                print(f"Model           : {get_model_name(self.raw_cfg)} ({model.num_trainable_params:,} trainable params)")
                 print(f"Train / Val     : {len(train_loader.dataset):,} / {len(val_loader.dataset):,} images")
-                print(f"Trainable params: {model.num_trainable_params:,}")
                 print(
                     f"Epochs          : {self.train_cfg.epochs} | Batch size: {self.loader_cfg.batch_size} | "
                     f"Workers: {self.loader_cfg.num_workers} | Channels-Last: {self.train_cfg.channels_last}"
@@ -80,7 +143,7 @@ class ExperimentRunner:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Marine iNaturalist CNN+RNN baseline.")
+    parser = argparse.ArgumentParser(description="Train Marine iNaturalist vision classifier.")
     parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
     parser.add_argument("--data-root", type=Path, default=None, help="Override dataset root directory.")
     parser.add_argument("--epochs", type=int, default=None, help="Override total training epochs.")

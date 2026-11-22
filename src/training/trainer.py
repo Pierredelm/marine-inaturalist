@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from src.models.cnn_rnn import BaseVisionClassifier
+from src.models import BaseVisionClassifier
 from src.training.metrics import ClassificationMetricTracker, EpochMetrics
 from src.utils.checkpoint import CheckpointManager
 from src.utils.device import DeviceContext, wrap_model_for_device
@@ -92,7 +92,8 @@ class MarineTrainer(BaseTrainer):
         self.scheduler: torch.optim.lr_scheduler.LRScheduler | None = None  # built in fit() #ok
         self.scaler = self.ctx.create_scaler()
         self.tracker = ClassificationMetricTracker(num_classes=self.num_classes) #récup l'ensemble des losses sur tout les batch d'une epoch
-        self.ckpt_manager = CheckpointManager(config.checkpoints_dir, prefix="cnn_rnn")
+        model_prefix = getattr(model.config, "name", "cnn_rnn") # préfixe dynamique tiré du YAML (ex: cnn_rnn, resnet_bigru...)
+        self.ckpt_manager = CheckpointManager(config.checkpoints_dir, prefix=model_prefix)
         self.logger = ExperimentLogger(config.logs_dir, enabled=self.ctx.is_main_process)
         self.skipped_steps = 0
 
