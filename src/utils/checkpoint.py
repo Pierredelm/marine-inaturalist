@@ -1,39 +1,38 @@
-﻿from dataclasses import dataclass
+"""Gestionnaire de sauvegarde atomique et de reprise d'état d'entraînement (.pt)."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, is_dataclass
 import os
 from pathlib import Path
 import random
 from typing import Any
+
 import numpy as np
 import torch
 import torch.nn as nn
 
-####### Reprendre à un checkpoint si l'on connait un problème
-# qu'est ce qu'il faut reprendre (.pt file): 
-# les poids du modele (model_stat_dict)
-# les poids du modèle adam (optimizer_state_dict)
-# là où en est LR (lr scheduler step count)
-# le référentiel pour la loss (AMP) ; scaler_state_dict
-# l'epoch et le meilleur score
-# l'historique des métriques (pour l'éval/viz)
-# l'état des pseudo aléatoire
 
-@dataclass(frozen=True) #regarde start epoch et best metric et génère __init__, __repr__ et __eq__// frozen so that imutable within an object
-#is true based on the __eq__ (egale attribut)// __repr__ = values (represente), comment il est définit. frozen génère un hash (identifiant unique), on peut
-# hold les mêmes valeurs mais être distinct
+@dataclass(frozen=True)
 class ResumeState:
+    """État restauré depuis un checkpoint (prochaine epoch et meilleur score atteint)."""
+
     start_epoch: int
     best_metric: float
 
 
 class CheckpointManager:
+    """Assure la persistance atomique des poids, optimiseurs, schedulers et graines aléatoires."""
+
     def __init__(self, checkpoints_dir: str | Path, prefix: str = "cnn_rnn") -> None:
-        self.checkpoints_dir = Path(checkpoints_dir)  #literallement chemin vers les poids
-        self.prefix = prefix # soit best, soit last
+        self.checkpoints_dir = Path(checkpoints_dir)
+        self.prefix = prefix
         self.last_path = self.checkpoints_dir / f"{prefix}_last.pt"
         self.best_path = self.checkpoints_dir / f"{prefix}_best.pt"
 
     @staticmethod
     def _capture_rng_state() -> dict[str, Any]:
+        """Capture l'état complet des générateurs aléatoires Python, NumPy et PyTorch."""
         state: dict[str, Any] = {
             "python": random.getstate(),
             "numpy": np.random.get_state(),
@@ -41,10 +40,11 @@ class CheckpointManager:
         }
         if torch.cuda.is_available():
             state["cuda"] = torch.cuda.get_rng_state_all()
-        return state #renvoie les au pifs sur tout les trucs auxquels on a pu appeler du au pif (numpy surtout en vrai)
+        return state
 
     @staticmethod
-    def _restore_rng_state(state: dict | None) -> None:
+    def _restore_rng_state(state: dict[str, Any] | None) -> None:
+        """Restaure les états des générateurs aléatoires enregistrés dans un checkpoint."""
         if not state:
             return
         if "python" in state:
@@ -59,8 +59,9 @@ class CheckpointManager:
 
     @staticmethod
     def _unwrap_model(model: nn.Module) -> nn.Module:
-        return model.module if hasattr(model, "module") else model #si DDP (= faire tourner sur plusieurs GPU), alors on doit présenter modèle comme un attribut modèle
-# concrètement envoie tout mon modèle et ce qu'il contient (les layers norm, les conv, les rnn...)
+        """Extrait le module brut lorsqu'il est encapsulé dans DistributedDataParallel."""
+        return model.module if hasattr(model, "module") else model
+
     def save(
         self,
         model: nn.Module,
@@ -72,18 +73,21 @@ class CheckpointManager:
         val_metrics: Any,
         is_best: bool = False,
     ) -> None:
+        """Sauvegarde atomiquement <prefix>_last.pt (et <prefix>_best.pt si is_best est vrai)."""
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         raw_model = self._unwrap_model(model)
+        raw_cfg = getattr(raw_model, "config", None)
+        serialized_cfg = asdict(raw_cfg) if is_dataclass(raw_cfg) else raw_cfg
 
-        payload = {
+        payload: dict[str, Any] = {
             "epoch": epoch,
             "best_metric": best_metric,
             "model_state_dict": raw_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
-            "val_metrics": val_metrics,
-            "model_config": getattr(raw_model, "config", None),
+            "val_metrics": asdict(val_metrics) if is_dataclass(val_metrics) else val_metrics,
+            "model_config": serialized_cfg,
             "rng_state": self._capture_rng_state(),
         }
 
@@ -96,7 +100,7 @@ class CheckpointManager:
             torch.save(payload, tmp_best)
             os.replace(tmp_best, self.best_path)
 
-    def load(#module pour reprendre là où on était
+    def load(
         self,
         checkpoint_path: str | Path,
         model: nn.Module,
@@ -105,9 +109,10 @@ class CheckpointManager:
         scaler: torch.amp.GradScaler | None = None,
         device: torch.device = torch.device("cpu"),
     ) -> ResumeState:
+        """Recharge les poids et états d'entraînement depuis un fichier checkpoint .pt."""
         ckpt_path = Path(checkpoint_path)
         if not ckpt_path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path.resolve()}")
+            raise FileNotFoundError(f"Fichier checkpoint introuvable : {ckpt_path.resolve()}")
 
         payload = torch.load(ckpt_path, map_location=device, weights_only=False)
         raw_model = self._unwrap_model(model)
