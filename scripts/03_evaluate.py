@@ -1,4 +1,7 @@
-﻿import argparse
+﻿import os
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
+import argparse
 from collections import Counter, defaultdict
 import csv
 import json
@@ -11,7 +14,7 @@ from tqdm import tqdm
 
 from src.data.dataset import MarineSpeciesDataset
 from src.data.transforms import MarineTransformBuilder, TransformConfig
-from src.models.cnn_rnn import CnnRnnClassifier, ModelConfig
+from src.models import build_model, get_model_name
 from src.utils.config import load_config
 from src.utils.device import setup_device
 
@@ -51,8 +54,7 @@ class ModelEvaluator:
         self.idx_to_class = {int(idx): name for name, idx in class_to_idx.items()}
 
         payload = torch.load(checkpoint_path, map_location=self.ctx.device, weights_only=False) #de mémoire contient plein d'infos sur le modèle type nb de workers, ddp, rank...
-        model_cfg = payload.get("model_config") or ModelConfig.from_dict(cfg)
-        self.model = CnnRnnClassifier(model_cfg).to(self.ctx.device)
+        self.model = build_model(cfg, config_override=payload.get("model_config")).to(self.ctx.device)
         self.model.load_state_dict(payload["model_state_dict"])
         self.model.eval()
 
@@ -180,7 +182,7 @@ class ModelEvaluator:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate Marine iNaturalist checkpoint.")
     parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
-    parser.add_argument("--checkpoint", type=Path, default=None, help="Defaults to checkpoints/cnn_rnn_best.pt")
+    parser.add_argument("--checkpoint", type=Path, default=None, help="Defaults to checkpoints/<model_name>_best.pt")
     parser.add_argument("--mode", choices=["val", "test"], default="val")
     parser.add_argument("--test-dir", type=Path, default=None, help="Folder of unlabeled test images.")
     parser.add_argument("--output-csv", type=Path, default=Path("submission.csv"))
@@ -190,7 +192,8 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     cfg = load_config(args.config)
-    ckpt = args.checkpoint or (Path(cfg["paths"]["checkpoints_dir"]) / "cnn_rnn_best.pt")
+    model_name = get_model_name(cfg)
+    ckpt = args.checkpoint or (Path(cfg["paths"]["checkpoints_dir"]) / f"{model_name}_best.pt")
     evaluator = ModelEvaluator(cfg=cfg, checkpoint_path=ckpt)
 
     if args.mode == "val":

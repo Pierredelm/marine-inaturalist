@@ -1,20 +1,20 @@
-﻿import argparse
+﻿import os
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1") # Évite le check réseau PyPI au spawn des workers
+
+import argparse
 from dataclasses import replace
 from pathlib import Path
 import random
 import numpy as np
 import torch
-import os
-
 
 from src.data.dataset import LoaderConfig, create_dataloaders
 from src.data.transforms import MarineTransformBuilder, TransformConfig
-from src.models.cnn_rnn import CnnRnnClassifier, ModelConfig
+from src.models import build_model, get_model_name
 from src.training.trainer import MarineTrainer, TrainConfig
 from src.utils.config import load_config
 from src.utils.device import cleanup_device, setup_device
 
-os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
 def seed_everything(seed: int) -> None: #définir tout les random state (python/numpy/cuda/torch)
     random.seed(seed)
@@ -98,8 +98,6 @@ class ExperimentRunner:
             loader_cfg = replace(loader_cfg, num_workers=args.num_workers)
         self.loader_cfg = loader_cfg
 
-        self.model_cfg = ModelConfig.from_dict(self.raw_cfg)
-
         train_cfg = TrainConfig.from_dict(self.raw_cfg)
         if args.epochs is not None:
             train_cfg = replace(train_cfg, epochs=args.epochs)
@@ -122,7 +120,7 @@ class ExperimentRunner:
                 train_loader = CudaPrefetcher(train_loader, ctx.device, self.train_cfg.channels_last)
                 val_loader = CudaPrefetcher(val_loader, ctx.device, self.train_cfg.channels_last)
 
-            model = CnnRnnClassifier(self.model_cfg)# définir tourner le modèle (agnostique)
+            model = build_model(self.raw_cfg) # instancie automatiquement le modèle déclaré dans le YAML
             trainer = MarineTrainer(
                 model=model,
                 config=self.train_cfg,
@@ -131,8 +129,8 @@ class ExperimentRunner:
 
             if ctx.is_main_process:
                 print(f"Device          : {ctx.device} (DDP={ctx.is_distributed}, world_size={ctx.world_size})")
+                print(f"Model           : {get_model_name(self.raw_cfg)} ({model.num_trainable_params:,} trainable params)")
                 print(f"Train / Val     : {len(train_loader.dataset):,} / {len(val_loader.dataset):,} images")
-                print(f"Trainable params: {model.num_trainable_params:,}")
                 print(
                     f"Epochs          : {self.train_cfg.epochs} | Batch size: {self.loader_cfg.batch_size} | "
                     f"Workers: {self.loader_cfg.num_workers} | Channels-Last: {self.train_cfg.channels_last}"
@@ -145,7 +143,7 @@ class ExperimentRunner:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Marine iNaturalist CNN+RNN baseline.")
+    parser = argparse.ArgumentParser(description="Train Marine iNaturalist vision classifier.")
     parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
     parser.add_argument("--data-root", type=Path, default=None, help="Override dataset root directory.")
     parser.add_argument("--epochs", type=int, default=None, help="Override total training epochs.")

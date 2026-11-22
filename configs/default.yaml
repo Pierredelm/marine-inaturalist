@@ -21,6 +21,7 @@ download:
   timeout_sec: 10
 
 model:
+  name : "cnn_rnn"
   in_channels: 3
   base_channels: 32
   rnn_type: "rnn"          # "rnn" | "gru" | "lstm" (switch to "gru" if still unstable)
