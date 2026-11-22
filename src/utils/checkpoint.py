@@ -44,17 +44,18 @@ class CheckpointManager:
         return state #renvoie les au pifs sur tout les trucs auxquels on a pu appeler du au pif (numpy surtout en vrai)
 
     @staticmethod
-    def _restore_rng_state(state: dict[str, Any] | None) -> None: #si on a planté, on amerait bien reprendre sur du pseudo aléatoire
-        if not state: #state définit l'aléatoire
+    def _restore_rng_state(state: dict | None) -> None:
+        if not state:
             return
         if "python" in state:
             random.setstate(state["python"])
         if "numpy" in state:
             np.random.set_state(state["numpy"])
-        if "torch" in state:
-            torch.set_rng_state(state["torch"])
-        if "cuda" in state and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(state["cuda"])
+        if "torch" in state and state["torch"] is not None:
+            torch.set_rng_state(state["torch"].detach().cpu().to(torch.uint8))
+        if torch.cuda.is_available() and state.get("cuda"):
+            cuda_states = [s.detach().cpu().to(torch.uint8) for s in state["cuda"]]
+            torch.cuda.set_rng_state_all(cuda_states)
 
     @staticmethod
     def _unwrap_model(model: nn.Module) -> nn.Module:
