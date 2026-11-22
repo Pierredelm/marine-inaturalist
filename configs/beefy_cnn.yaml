@@ -1,0 +1,38 @@
+﻿# Central configuration for marine-inaturalist
+
+paths:
+  data_root: "C:/Users/pdelm/datasets/marine-inaturalist"
+  keys_file: "C:/Users/pdelm/datasets/marine-inaturalist/train_keys.txt"
+  images_dir: "C:/Users/pdelm/datasets/marine-inaturalist/images"
+  manifests_dir: "C:/Users/pdelm/datasets/marine-inaturalist/manifests"
+  checkpoints_dir: "C:/Users/pdelm/datasets/marine-inaturalist/checkpoints"
+  logs_dir: "C:/Users/pdelm/datasets/marine-inaturalist/logs"
+
+data:
+  seed: 42
+  sample_fraction: 0.22    # ~22 Go (~1.35M images à ~16 Ko/img)
+  val_ratio: 0.20
+  image_size: 224
+  decode_min_side: 256   # JPEG draft decode target; keep >= image_size * 256/224
+  num_classes: 2185
+
+download:
+  max_workers: 32          # augmenté de 16 -> 32 pour absorber la latence HTTPS sur ~1.2M nouvelles vignettes
+  timeout_sec: 10
+
+model:
+  name: "convolutional_resnet"
+  in_channels: 3
+  base_channels: 96
+  dropout: 0.1
+
+train:
+  epochs: 20
+  batch_size: 256
+  lr: 1.5e-3
+  warmup_epochs: 2.0
+  weight_decay: 0.05
+  label_smoothing: 0.1
+  max_grad_norm: 1.0
+  use_amp: true
+  channels_last: true
